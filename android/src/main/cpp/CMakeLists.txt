@@ -20,3 +20,6 @@ target_link_libraries(webrtc_apm_jni PRIVATE
     webrtc_apm_wrapper
     log
 )
+
+# 16KB page alignment for Android 15+ compatibility.
+target_link_options(webrtc_apm_jni PRIVATE "-Wl,-z,max-page-size=16384")
