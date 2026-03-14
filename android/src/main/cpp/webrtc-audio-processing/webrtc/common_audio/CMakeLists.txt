@@ -106,27 +106,12 @@ if (have_neon)
             )
 endif ()
 
-if (have_arm)
-    LIST(APPEND COMMON_AUDIO_SRC
-            "signal_processing/complex_bit_reverse_arm.S"
-            )
-    if (have_armv7 OR have_arm64)
-        LIST(APPEND COMMON_AUDIO_SRC
-                "signal_processing/filter_ar_fast_q12_armv7.S"
-                )
-    else ()
-        LIST(APPEND COMMON_AUDIO_SRC
-                "signal_processing/filter_ar_fast_q12.c"
-                )
-    endif ()
-endif ()
-
-if (NOT have_arm)
-    LIST(APPEND COMMON_AUDIO_SRC
-            "signal_processing/complex_bit_reverse.c"
-            "signal_processing/filter_ar_fast_q12.c"
-            )
-endif ()
+# Always use C fallback — ARM32 assembly (.S) doesn't compile reliably
+# with Android NDK's CMake toolchain.
+LIST(APPEND COMMON_AUDIO_SRC
+        "signal_processing/complex_bit_reverse.c"
+        "signal_processing/filter_ar_fast_q12.c"
+        )
 
 
 if (CMAKE_SYSTEM_PROCESSOR MATCHES "(x86)|(x86_64)|(i686)")
@@ -134,6 +119,8 @@ if (CMAKE_SYSTEM_PROCESSOR MATCHES "(x86)|(x86_64)|(i686)")
             "third_party/ooura/fft_size_128/ooura_fft_sse2.cc"
             "fir_filter_sse.cc"
             "fir_filter_sse.h"
+            "fir_filter_avx2.cc"
+            "fir_filter_avx2.h"
             "resampler/sinc_resampler_sse.cc"
             "resampler/sinc_resampler_avx2.cc"
             )
