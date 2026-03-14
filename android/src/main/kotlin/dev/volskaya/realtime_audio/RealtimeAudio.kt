@@ -113,7 +113,16 @@ class RealtimeAudio(
           aecEnabled = true,
           nsEnabled = true,
           agcEnabled = true,
-        )
+        ).also { apm ->
+          // Estimate audio pipeline delay: AudioTrack buffer + AudioRecord buffer.
+          val playbackLatencyMs = (playerOutputFormat.getMinBufferSizeTrack().toLong() * 1000) /
+            (arguments.playerSampleRate * playerOutputFormat.getBitRatio())
+          val captureLatencyMs = (recorderFormat.getMinBufferSizeRecord().toLong() * 1000) /
+            (arguments.recorderSampleRate * recorderFormat.getBitRatio())
+          val totalDelayMs = (playbackLatencyMs + captureLatencyMs).toInt().coerceIn(50, 300)
+          apm.setStreamDelay(totalDelayMs)
+          Log.i("RealtimeAudio", "APM stream delay: ${totalDelayMs}ms (playback=${playbackLatencyMs}ms, capture=${captureLatencyMs}ms)")
+        }
       }.onFailure {
         Log.w("RealtimeAudio", "WebRTC APM unavailable, falling back to raw audio: ${it.message}")
       }.getOrNull()?.takeIf { it.isAvailable }
@@ -303,8 +312,18 @@ class RealtimeAudio(
     val minBufferSize = recorderFormat.getMinBufferSizeRecord()
     val bufferSize = minBufferSize * recorderFormat.getBitRatio()
 
+    // Use VOICE_COMMUNICATION source for hardware-level preprocessing (AEC/NS
+    // on supported devices) as a first pass. WebRTC APM then processes on top.
+    // Keep MODE_NORMAL for playback volume — VOICE_COMMUNICATION source works
+    // independently of audio mode.
+    val audioSource = if (arguments.voiceProcessing) {
+      MediaRecorder.AudioSource.VOICE_COMMUNICATION
+    } else {
+      MediaRecorder.AudioSource.MIC
+    }
+
     return AudioRecord(
-      MediaRecorder.AudioSource.MIC,
+      audioSource,
       recorderFormat.sampleRate,
       recorderFormat.channelMask,
       recorderFormat.encoding,

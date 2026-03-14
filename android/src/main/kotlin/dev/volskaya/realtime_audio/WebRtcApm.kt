@@ -18,12 +18,19 @@ class WebRtcApm(
                 captureSampleRate, renderSampleRate,
                 aecEnabled, nsEnabled, agcEnabled
             )
+            Log.i(TAG, "WebRTC APM initialized (capture=${captureSampleRate}Hz, render=${renderSampleRate}Hz)")
         } catch (e: UnsatisfiedLinkError) {
             Log.e(TAG, "Failed to load webrtc_apm_jni: ${e.message}")
         }
     }
 
     val isAvailable: Boolean get() = nativePtr != 0L
+
+    fun setStreamDelay(delayMs: Int) {
+        if (nativePtr != 0L) {
+            nativeSetStreamDelay(nativePtr, delayMs)
+        }
+    }
 
     fun processCapture(audioData: ByteArray): ByteArray {
         if (nativePtr == 0L) return audioData
@@ -48,6 +55,7 @@ class WebRtcApm(
     ): Long
 
     private external fun nativeDestroy(ptr: Long)
+    private external fun nativeSetStreamDelay(ptr: Long, delayMs: Int)
     private external fun nativeProcessCapture(ptr: Long, audioData: ByteArray): ByteArray
     private external fun nativeProcessRender(ptr: Long, audioData: ByteArray)
 
