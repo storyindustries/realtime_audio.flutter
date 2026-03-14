@@ -1,0 +1,4 @@
+[submodule "android/src/main/cpp/webrtc-audio-processing"]
+	path = android/src/main/cpp/webrtc-audio-processing
+	url = git@github.com:storyindustries/webrtc-audio-processing-cmake.git
+	branch = fix/android-arm64-float-abi

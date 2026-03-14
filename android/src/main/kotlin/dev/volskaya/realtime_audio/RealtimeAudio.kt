@@ -11,9 +11,7 @@ import android.media.AudioRecord.OnRecordPositionUpdateListener
 import android.media.AudioTrack
 import android.media.AudioTrack.OnPlaybackPositionUpdateListener
 import android.media.MediaRecorder
-import android.media.audiofx.AcousticEchoCanceler
-import android.media.audiofx.AutomaticGainControl
-import android.media.audiofx.NoiseSuppressor
+import android.util.Log
 import android.os.Handler
 import android.os.Looper
 import androidx.core.app.ActivityCompat
@@ -80,9 +78,7 @@ class RealtimeAudio(
   private val audioBackgroundTrack: LoopAudioTrack?
   private val audioManager: AudioManager = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
 
-  private var echoCanceler: AcousticEchoCanceler? = null
-  private var noiseSuppressor: NoiseSuppressor? = null
-  private var gainControl: AutomaticGainControl? = null
+  private var webRtcApm: WebRtcApm? = null
 
   private var isRunning = false
   private var isDisposed = false
@@ -107,11 +103,20 @@ class RealtimeAudio(
     recorder = if (arguments.recorderEnabled) getRecorder() else null
     audioTrack = getAudioTrack(audioSessionId)
     audioBackgroundTrack = if (arguments.backgroundEnabled) getBackgroundTrack(audioSessionId) else null
+    audioManager.mode = AudioManager.MODE_NORMAL
 
     if (arguments.voiceProcessing && arguments.recorderEnabled) {
-      audioManager.mode = AudioManager.MODE_IN_COMMUNICATION
-    } else {
-      audioManager.mode = AudioManager.MODE_NORMAL
+      webRtcApm = runCatching {
+        WebRtcApm(
+          captureSampleRate = arguments.recorderSampleRate,
+          renderSampleRate = arguments.playerSampleRate,
+          aecEnabled = true,
+          nsEnabled = true,
+          agcEnabled = true,
+        )
+      }.onFailure {
+        Log.w("RealtimeAudio", "WebRTC APM unavailable, falling back to raw audio: ${it.message}")
+      }.getOrNull()?.takeIf { it.isAvailable }
     }
 
     methodChannel.setMethodCallHandler(this)
@@ -125,16 +130,11 @@ class RealtimeAudio(
     stopBackground()
     stopAudio()
     stopRecording()
-    echoCanceler?.release()
-    noiseSuppressor?.release()
-    gainControl?.release()
-    echoCanceler = null
-    noiseSuppressor = null
-    gainControl = null
+    webRtcApm?.release()
+    webRtcApm = null
     audioBackgroundTrack?.release()
     audioTrack.release()
     recorder?.release()
-    audioManager.mode = AudioManager.MODE_NORMAL
   }
 
 
@@ -259,30 +259,19 @@ class RealtimeAudio(
 
   //
 
-  private fun getAudioTrack(audioSessionId: Int? = null): ChunkAudioTrack {
-    val useVoice = arguments.voiceProcessing && arguments.recorderEnabled
-    val attributes = if (useVoice) {
-      AudioAttributes.Builder()
-        .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
-        .setUsage(AudioAttributes.USAGE_VOICE_COMMUNICATION)
-        .build()
-    } else {
+  private fun getAudioTrack(audioSessionId: Int? = null) =
+    ChunkAudioTrack(
       AudioAttributes.Builder()
         .setLegacyStreamType(AudioManager.STREAM_MUSIC)
         .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
         .setUsage(AudioAttributes.USAGE_MEDIA)
-        .build()
-    }
-
-    return ChunkAudioTrack(
-      attributes,
+        .build(),
       playerOutputFormat,
       playerOutputFormat.getMinBufferSizeTrack(),
       AudioTrack.MODE_STREAM,
       audioSessionId ?: AudioManager.AUDIO_SESSION_ID_GENERATE,
       this
     )
-  }
 
   private fun getBackgroundTrack(audioSessionId: Int? = null) =
     LoopAudioTrack(
@@ -314,38 +303,16 @@ class RealtimeAudio(
     val minBufferSize = recorderFormat.getMinBufferSizeRecord()
     val bufferSize = minBufferSize * recorderFormat.getBitRatio()
 
-    val audioSource = if (arguments.voiceProcessing) {
-      MediaRecorder.AudioSource.VOICE_COMMUNICATION
-    } else {
-      MediaRecorder.AudioSource.MIC
-    }
-
     return AudioRecord(
-      audioSource,
+      MediaRecorder.AudioSource.MIC,
       recorderFormat.sampleRate,
       recorderFormat.channelMask,
       recorderFormat.encoding,
       bufferSize,
-    ).also { record ->
+    ).also {
       recorderData = ShortArray(recorderChunkBufferSize)
-      record.positionNotificationPeriod = recorderChunkBufferSize
-      record.setRecordPositionUpdateListener(this)
-
-      if (arguments.voiceProcessing) {
-        val sessionId = record.audioSessionId
-
-        if (AcousticEchoCanceler.isAvailable()) {
-          echoCanceler = AcousticEchoCanceler.create(sessionId)?.also { it.enabled = true }
-        }
-
-        if (NoiseSuppressor.isAvailable()) {
-          noiseSuppressor = NoiseSuppressor.create(sessionId)?.also { it.enabled = true }
-        }
-
-        if (AutomaticGainControl.isAvailable()) {
-          gainControl = AutomaticGainControl.create(sessionId)?.also { it.enabled = true }
-        }
-      }
+      it.positionNotificationPeriod = recorderChunkBufferSize
+      it.setRecordPositionUpdateListener(this)
     }
   }
 
@@ -360,6 +327,9 @@ class RealtimeAudio(
 
   private fun queueAudio(id: String, data: ByteArray) {
     if (data.isEmpty()) return
+
+    // Feed playback audio into APM as far-end echo reference.
+    webRtcApm?.processRender(data)
 
     audioTrack.queue(id, data)
     if (audioTrack.playState != AudioTrack.PLAYSTATE_PAUSED) {
@@ -448,9 +418,10 @@ class RealtimeAudio(
         }
 
         bytes.getOrNull()?.array()?.let { buffer ->
-          val dbfs = getDbfsFromByteArrays(listOf(buffer), 0, buffer.size)
+          val processed = webRtcApm?.processCapture(buffer) ?: buffer
+          val dbfs = getDbfsFromByteArrays(listOf(processed), 0, processed.size)
           scope.launch {
-            handleRecorderData(buffer, dbfs)
+            handleRecorderData(processed, dbfs)
           }
         }
       }
