@@ -11,6 +11,9 @@ import android.media.AudioRecord.OnRecordPositionUpdateListener
 import android.media.AudioTrack
 import android.media.AudioTrack.OnPlaybackPositionUpdateListener
 import android.media.MediaRecorder
+import android.media.audiofx.AcousticEchoCanceler
+import android.media.audiofx.AutomaticGainControl
+import android.media.audiofx.NoiseSuppressor
 import android.os.Handler
 import android.os.Looper
 import androidx.core.app.ActivityCompat
@@ -77,6 +80,10 @@ class RealtimeAudio(
   private val audioBackgroundTrack: LoopAudioTrack?
   private val audioManager: AudioManager = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
 
+  private var echoCanceler: AcousticEchoCanceler? = null
+  private var noiseSuppressor: NoiseSuppressor? = null
+  private var gainControl: AutomaticGainControl? = null
+
   private var isRunning = false
   private var isDisposed = false
   private var shouldBeRunning = false
@@ -100,7 +107,13 @@ class RealtimeAudio(
     recorder = if (arguments.recorderEnabled) getRecorder() else null
     audioTrack = getAudioTrack(audioSessionId)
     audioBackgroundTrack = if (arguments.backgroundEnabled) getBackgroundTrack(audioSessionId) else null
-    audioManager.mode = AudioManager.MODE_NORMAL
+
+    if (arguments.voiceProcessing && arguments.recorderEnabled) {
+      audioManager.mode = AudioManager.MODE_IN_COMMUNICATION
+    } else {
+      audioManager.mode = AudioManager.MODE_NORMAL
+    }
+
     methodChannel.setMethodCallHandler(this)
 
     audioBackgroundTrack?.setVolume(arguments.backgroundVolume.toFloat())
@@ -112,9 +125,16 @@ class RealtimeAudio(
     stopBackground()
     stopAudio()
     stopRecording()
+    echoCanceler?.release()
+    noiseSuppressor?.release()
+    gainControl?.release()
+    echoCanceler = null
+    noiseSuppressor = null
+    gainControl = null
     audioBackgroundTrack?.release()
     audioTrack.release()
     recorder?.release()
+    audioManager.mode = AudioManager.MODE_NORMAL
   }
 
 
@@ -239,19 +259,30 @@ class RealtimeAudio(
 
   //
 
-  private fun getAudioTrack(audioSessionId: Int? = null) =
-    ChunkAudioTrack(
+  private fun getAudioTrack(audioSessionId: Int? = null): ChunkAudioTrack {
+    val useVoice = arguments.voiceProcessing && arguments.recorderEnabled
+    val attributes = if (useVoice) {
+      AudioAttributes.Builder()
+        .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+        .setUsage(AudioAttributes.USAGE_VOICE_COMMUNICATION)
+        .build()
+    } else {
       AudioAttributes.Builder()
         .setLegacyStreamType(AudioManager.STREAM_MUSIC)
         .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
         .setUsage(AudioAttributes.USAGE_MEDIA)
-        .build(),
+        .build()
+    }
+
+    return ChunkAudioTrack(
+      attributes,
       playerOutputFormat,
       playerOutputFormat.getMinBufferSizeTrack(),
       AudioTrack.MODE_STREAM,
       audioSessionId ?: AudioManager.AUDIO_SESSION_ID_GENERATE,
       this
     )
+  }
 
   private fun getBackgroundTrack(audioSessionId: Int? = null) =
     LoopAudioTrack(
@@ -283,16 +314,38 @@ class RealtimeAudio(
     val minBufferSize = recorderFormat.getMinBufferSizeRecord()
     val bufferSize = minBufferSize * recorderFormat.getBitRatio()
 
+    val audioSource = if (arguments.voiceProcessing) {
+      MediaRecorder.AudioSource.VOICE_COMMUNICATION
+    } else {
+      MediaRecorder.AudioSource.MIC
+    }
+
     return AudioRecord(
-      MediaRecorder.AudioSource.MIC,
+      audioSource,
       recorderFormat.sampleRate,
       recorderFormat.channelMask,
       recorderFormat.encoding,
       bufferSize,
-    ).also {
+    ).also { record ->
       recorderData = ShortArray(recorderChunkBufferSize)
-      it.positionNotificationPeriod = recorderChunkBufferSize
-      it.setRecordPositionUpdateListener(this)
+      record.positionNotificationPeriod = recorderChunkBufferSize
+      record.setRecordPositionUpdateListener(this)
+
+      if (arguments.voiceProcessing) {
+        val sessionId = record.audioSessionId
+
+        if (AcousticEchoCanceler.isAvailable()) {
+          echoCanceler = AcousticEchoCanceler.create(sessionId)?.also { it.enabled = true }
+        }
+
+        if (NoiseSuppressor.isAvailable()) {
+          noiseSuppressor = NoiseSuppressor.create(sessionId)?.also { it.enabled = true }
+        }
+
+        if (AutomaticGainControl.isAvailable()) {
+          gainControl = AutomaticGainControl.create(sessionId)?.also { it.enabled = true }
+        }
+      }
     }
   }
 
