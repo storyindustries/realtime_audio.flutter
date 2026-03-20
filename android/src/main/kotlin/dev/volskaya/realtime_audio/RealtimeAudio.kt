@@ -398,15 +398,17 @@ class RealtimeAudio(
   //
 
   private fun startRecording() {
-    if (recorder == null || recorder.recordingState == AudioRecord.RECORDSTATE_RECORDING) return
-    recorder.startRecording()
-    onPeriodicNotification(recorder)
+    val rec = recorder ?: return
+    if (rec.recordingState == AudioRecord.RECORDSTATE_RECORDING) return
+    rec.startRecording()
+    onPeriodicNotification(rec)
   }
 
   private fun stopRecording() {
-    if (recorder == null || recorder.recordingState == AudioRecord.RECORDSTATE_STOPPED) return
+    val rec = recorder ?: return
+    if (rec.recordingState == AudioRecord.RECORDSTATE_STOPPED) return
 
-    recorder.stop()
+    rec.stop()
     notifyRecorderVolume()
   }
 
