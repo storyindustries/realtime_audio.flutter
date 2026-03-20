@@ -23,7 +23,7 @@ class RealtimeAudioSession {
           .playAndRecord, mode: .voiceChat, options: [.defaultToSpeaker, .allowBluetooth, .duckOthers])
         try instance.setPreferredInputOrientation(.portrait)
         try instance.setAllowHapticsAndSystemSoundsDuringRecording(false)
-        if #available(iOS 17.0, *) {
+        if #available(iOS 18.2, *) {
           try instance.setPrefersEchoCancelledInput(true)
         }
       }
