@@ -286,6 +286,12 @@ class RealtimeAudio {
   Future<RealtimeAudioInstanceResponseClearQueue?> clearQueue() => _withInitAndLock(
       () async => _channel?.invokeMethodData('clearQueue', RealtimeAudioInstanceResponseClearQueue.fromJson));
 
+  /// Dynamically toggle the recorder (and voice processing / AEC) without
+  /// disposing the engine. The native side reconfigures the audio session
+  /// and restarts the engine internally.
+  Future<void> setRecorderEnabled(bool enabled) =>
+      _withInitAndLock(() async => _channel?.invokeMethod('setRecorderEnabled', {'enabled': enabled}));
+
   //
 
   Future<void> stopBackground() => _withInitAndLock(() async => _channel?.invokeMethod('stopBackground'));

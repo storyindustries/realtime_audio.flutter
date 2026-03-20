@@ -47,6 +47,11 @@ class RealtimeAudio: NSObject {
     chunkCount: 0
   )
 
+  /// Mutable override for recorder state — allows dynamic toggling without
+  /// disposing the engine. `nil` means use `arguments.recorderEnabled`.
+  private var _recorderEnabledOverride: Bool?
+  var isRecorderEnabled: Bool { _recorderEnabledOverride ?? arguments.recorderEnabled }
+
   private var shouldBeStarted = false
   private var shouldBePaused = false
   private var isDisposed = false
@@ -89,7 +94,7 @@ class RealtimeAudio: NSObject {
     audioPlayerNode.setListener(self)
     methodChannel.setMethodCallHandler(handleFlutterMethod)
 
-    try audioSession.configure(recorderEnabled: arguments.recorderEnabled)
+    try audioSession.configure(recorderEnabled: isRecorderEnabled)
     try attachNodes()
     try audioSession.activate()
 
@@ -101,7 +106,7 @@ class RealtimeAudio: NSObject {
 
   private func attachNodes() throws {
     #if os(iOS)
-      if arguments.recorderEnabled {
+      if isRecorderEnabled {
         // Enabling voice processing affects output sound profile on built in speaker.
         try audioEngine.outputNode.setVoiceProcessingEnabled(true)
         try audioEngine.inputNode.setVoiceProcessingEnabled(true)
@@ -156,7 +161,7 @@ class RealtimeAudio: NSObject {
   }
 
   private func changeVolume() {
-    if !arguments.recorderEnabled { return }
+    if !isRecorderEnabled { return }
     #if os(iOS)
       audioEngine.mainMixerNode.outputVolume = audioSession.instance.outputVolume
     #endif
@@ -374,6 +379,16 @@ extension RealtimeAudio {
       stopBackground()
       break
     //
+    case "setRecorderEnabled":
+      guard let arguments = call.arguments as? [String: Any] else {
+        throw TextError("Missing arguments for \(call.method)")
+      }
+      guard let enabled = arguments["enabled"] as? Bool else {
+        throw TextError("Missing 'enabled' for: \(call.method).")
+      }
+      try setRecorderEnabled(enabled)
+      break
+    //
     default:
       value = nil
       break  // Do nothing
@@ -434,7 +449,7 @@ extension RealtimeAudio: ChunkAudioEventListener {
 // Recorder extension.
 extension RealtimeAudio {
   private func installTap() throws {
-    if !arguments.recorderEnabled { return }
+    if !isRecorderEnabled { return }
 
     audioEngine.inputNode.removeTap(onBus: recorderPreferredBus)
 
@@ -557,6 +572,17 @@ extension RealtimeAudio {
     stopAudio()
     notifyRecorderVolume()
     audioEngine.stop()
+  }
+
+  /// Dynamically toggle the recorder (and voice processing / AEC) without
+  /// disposing the engine. Triggers an internal restart to reconfigure the
+  /// audio session and engine nodes.
+  func setRecorderEnabled(_ enabled: Bool) throws {
+    if enabled == isRecorderEnabled { return }
+    _recorderEnabledOverride = enabled
+    try audioSession.configure(recorderEnabled: enabled)
+    try audioSession.activate()
+    try restart()
   }
 
   private func restart() throws {
