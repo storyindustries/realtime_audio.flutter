@@ -73,7 +73,8 @@ class RealtimeAudio(
     .build()
 
   private var recorderData: ShortArray? = null
-  private val recorder: AudioRecord?
+  private var recorder: AudioRecord?
+  private var isRecorderEnabled: Boolean = arguments.recorderEnabled
   private val audioTrack: ChunkAudioTrack
   private val audioBackgroundTrack: LoopAudioTrack?
   private val audioManager: AudioManager = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
@@ -197,6 +198,11 @@ class RealtimeAudio(
       "pause" -> pause()
       "resume" -> resume()
       "stop" -> stop()
+
+      "setRecorderEnabled" -> {
+        val enabled = call.argument<Boolean>("enabled") ?: throw Error("Missing 'enabled' for ${call.method}.")
+        setRecorderEnabled(enabled)
+      }
 
       "stopBackground" -> stopBackground()
       "playBackground" -> {
@@ -480,6 +486,48 @@ class RealtimeAudio(
   }
 
   //
+
+  /// Dynamically toggle the recorder (and WebRTC APM / AEC) without
+  /// disposing the entire engine. Creates or releases the AudioRecord
+  /// and WebRtcApm as needed.
+  private fun setRecorderEnabled(enabled: Boolean) {
+    if (enabled == isRecorderEnabled) return
+    isRecorderEnabled = enabled
+
+    if (enabled) {
+      // Create recorder + APM
+      recorder = getRecorder()
+      if (arguments.voiceProcessing) {
+        webRtcApm = runCatching {
+          WebRtcApm(
+            captureSampleRate = arguments.recorderSampleRate,
+            renderSampleRate = arguments.playerSampleRate,
+            aecEnabled = true,
+            nsEnabled = true,
+            agcEnabled = true,
+          ).also { apm ->
+            val playbackLatencyMs = (playerOutputFormat.getMinBufferSizeTrack().toLong() * 1000) /
+              (arguments.playerSampleRate * playerOutputFormat.getBitRatio())
+            val captureLatencyMs = (recorderFormat.getMinBufferSizeRecord().toLong() * 1000) /
+              (arguments.recorderSampleRate * recorderFormat.getBitRatio())
+            val totalDelayMs = (playbackLatencyMs + captureLatencyMs).toInt().coerceIn(50, 300)
+            apm.setStreamDelay(totalDelayMs)
+          }
+        }.getOrNull()?.takeIf { it.isAvailable }
+      }
+      if (isRunning) startRecording()
+    } else {
+      // Release recorder + APM
+      stopRecording()
+      recorder?.release()
+      recorder = null
+      recorderData = null
+      webRtcApm?.release()
+      webRtcApm = null
+    }
+
+    Log.i("RealtimeAudio", "Recorder ${if (enabled) "enabled" else "disabled"} dynamically")
+  }
 
   private fun start() {
     shouldBeRunning = true
