@@ -17,7 +17,7 @@ Pod::Spec.new do |s|
   s.pod_target_xcconfig = {
     'DEFINES_MODULE' => 'YES',
     'CLANG_CXX_LANGUAGE_STANDARD' => 'c++14',
-    'HEADER_SEARCH_PATHS' => '"$(PODS_TARGET_SRCROOT)/Libs/include"',
+    'HEADER_SEARCH_PATHS' => '"$(PODS_TARGET_SRCROOT)/Libs/include" "$(PODS_TARGET_SRCROOT)/Libs/include/webrtc"',
     'OTHER_LDFLAGS' => '-lc++',
   }
   s.swift_version = '5.0'
