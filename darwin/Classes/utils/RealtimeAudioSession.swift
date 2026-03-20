@@ -20,7 +20,7 @@ class RealtimeAudioSession {
         try instance.setPreferredInputOrientation(.portrait)
       } else {
         try instance.setCategory(
-          .playAndRecord, mode: .videoChat, options: [.defaultToSpeaker, .allowBluetooth, .duckOthers])
+          .playAndRecord, mode: .voiceChat, options: [.defaultToSpeaker, .allowBluetooth, .duckOthers])
         try instance.setPreferredInputOrientation(.portrait)
         try instance.setAllowHapticsAndSystemSoundsDuringRecording(false)
       }
