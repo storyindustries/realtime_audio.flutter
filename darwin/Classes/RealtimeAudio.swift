@@ -52,6 +52,13 @@ class RealtimeAudio: NSObject {
   private var _recorderEnabledOverride: Bool?
   var isRecorderEnabled: Bool { _recorderEnabledOverride ?? arguments.recorderEnabled }
 
+  #if os(iOS)
+    /// WebRTC Audio Processing Module for software echo cancellation, noise
+    /// suppression, and AGC. Used instead of Apple's voice processing when
+    /// the `voiceProcessing` argument is true.
+    private var webRtcApm: WebRtcApm?
+  #endif
+
   private var shouldBeStarted = false
   private var shouldBePaused = false
   private var isDisposed = false
@@ -102,15 +109,39 @@ class RealtimeAudio: NSObject {
 
     try installTap()
     audioEngine.prepare()
+
+    #if os(iOS)
+      if arguments.voiceProcessing && isRecorderEnabled {
+        let apm = WebRtcApm(
+          captureSampleRate: Int(recorderSampleRate),
+          renderSampleRate: Int(playerSampleRate),
+          aecEnabled: true,
+          nsEnabled: true,
+          agcEnabled: true
+        )
+        if apm.isAvailable {
+          // Estimate audio pipeline delay from I/O buffer duration.
+          let ioDuration = audioSession.instance.ioBufferDuration
+          let delayMs = min(300, max(50, Int((ioDuration * 2 * 1000).rounded())))
+          apm.setStreamDelay(delayMs)
+          webRtcApm = apm
+          methodChannel.invokeMethod("echo", arguments: "WebRTC APM initialized (delay=\(delayMs)ms)")
+        }
+      }
+    #endif
   }
 
   private func attachNodes() throws {
     #if os(iOS)
       if isRecorderEnabled {
-        // Enabling voice processing affects output sound profile on built in speaker.
-        try audioEngine.outputNode.setVoiceProcessingEnabled(true)
-        try audioEngine.inputNode.setVoiceProcessingEnabled(true)
-        audioEngine.inputNode.isVoiceProcessingAGCEnabled = false
+        // When WebRTC APM is active, it handles AEC/NS/AGC in software — skip
+        // Apple's built-in voice processing to avoid double-processing.
+        let useAppleVP = webRtcApm == nil
+        try audioEngine.outputNode.setVoiceProcessingEnabled(useAppleVP)
+        try audioEngine.inputNode.setVoiceProcessingEnabled(useAppleVP)
+        if useAppleVP {
+          audioEngine.inputNode.isVoiceProcessingAGCEnabled = false
+        }
       }
     #endif
 
@@ -172,6 +203,8 @@ class RealtimeAudio: NSObject {
 
     #if os(iOS)
       audioSession.instance.removeObserver(self, forKeyPath: "outputVolume")
+      webRtcApm?.release()
+      webRtcApm = nil
     #endif
 
     methodChannel.setMethodCallHandler(nil)
@@ -184,6 +217,12 @@ class RealtimeAudio: NSObject {
 
   func dispose() throws {
     isDisposed = true
+
+    #if os(iOS)
+      webRtcApm?.release()
+      webRtcApm = nil
+    #endif
+
     methodChannel.setMethodCallHandler(nil)
     detachTimers()
     try stop()
@@ -412,6 +451,17 @@ extension RealtimeAudio: ChunkAudioEventListener {
   private func queueAudio(_ id: String, _ data: [UInt8]) throws {
     if data.isEmpty { return }
 
+    // Feed playback audio into APM as far-end echo reference.
+    #if os(iOS)
+      if let apm = webRtcApm {
+        data.withUnsafeBufferPointer { ptr in
+          ptr.baseAddress!.withMemoryRebound(to: Int8.self, capacity: data.count) { int8Ptr in
+            apm.processRender(int8Ptr, length: data.count)
+          }
+        }
+      }
+    #endif
+
     try audioPlayerNode.queue(id, data)
     if !state.isPaused { playAudio() }
   }
@@ -506,6 +556,17 @@ extension RealtimeAudio {
       }
     }
 
+    // Process captured audio through WebRTC APM (echo cancellation, NS, AGC).
+    #if os(iOS)
+      if let apm = webRtcApm {
+        data.withUnsafeMutableBufferPointer { ptr in
+          ptr.baseAddress!.withMemoryRebound(to: Int8.self, capacity: numBytes) { int8Ptr in
+            apm.processCapture(int8Ptr, length: numBytes)
+          }
+        }
+      }
+    #endif
+
     // Send the list to Flutter.
     let flutterData = FlutterStandardTypedData(bytes: NSData(bytes: data, length: data.count) as Data)
     let volume = [buffer].getDbfs(0, Int(buffer.frameLength))
@@ -580,6 +641,25 @@ extension RealtimeAudio {
   func setRecorderEnabled(_ enabled: Bool) throws {
     if enabled == isRecorderEnabled { return }
     _recorderEnabledOverride = enabled
+
+    #if os(iOS)
+      if enabled && arguments.voiceProcessing && webRtcApm == nil {
+        let apm = WebRtcApm(
+          captureSampleRate: Int(recorderSampleRate),
+          renderSampleRate: Int(playerSampleRate)
+        )
+        if apm.isAvailable {
+          let ioDuration = audioSession.instance.ioBufferDuration
+          let delayMs = min(300, max(50, Int((ioDuration * 2 * 1000).rounded())))
+          apm.setStreamDelay(delayMs)
+          webRtcApm = apm
+        }
+      } else if !enabled {
+        webRtcApm?.release()
+        webRtcApm = nil
+      }
+    #endif
+
     try audioSession.configure(recorderEnabled: enabled)
     try audioSession.activate()
     try restart()

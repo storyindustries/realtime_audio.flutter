@@ -9,9 +9,17 @@ Pod::Spec.new do |s|
   s.license          = { :file => '../LICENSE' }
   s.author           = { 'Roland' => 'roland@volskaya.dev' }
   s.source           = { :path => '.' }
-  s.source_files = 'Classes/**/*'
+  s.source_files = 'Classes/**/*.{swift,h,m,mm}'
+  s.public_header_files = 'Classes/apm/WebRtcApmBridge.h'
+  s.vendored_libraries = 'Libs/libwebrtc_apm_wrapper.a'
   s.dependency 'Flutter'
   s.platform = :ios, '15.0'
-  s.pod_target_xcconfig = { 'DEFINES_MODULE' => 'YES' }
+  s.pod_target_xcconfig = {
+    'DEFINES_MODULE' => 'YES',
+    'CLANG_CXX_LANGUAGE_STANDARD' => 'c++14',
+    'HEADER_SEARCH_PATHS' => '"$(PODS_TARGET_SRCROOT)/Libs/include"',
+    'OTHER_LDFLAGS' => '-lc++',
+  }
   s.swift_version = '5.0'
+  s.library = 'c++'
 end
