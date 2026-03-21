@@ -16,9 +16,10 @@ struct ApmHandle {
     int renderFrameSize = 0;  // samples per 10ms frame (render)
     int streamDelayMs = 100;  // estimated audio pipeline delay
 
-    // Pre-allocated float buffer for the larger of capture/render frames.
-    float* floatBuf = nullptr;
-    int floatBufSize = 0;
+    // Separate float buffers for capture and render to avoid data races
+    // (processCapture runs on the audio thread, processRender on the main thread).
+    float* captureFloatBuf = nullptr;
+    float* renderFloatBuf = nullptr;
 };
 
 extern "C" {
@@ -40,12 +41,9 @@ WebRtcApmHandle webrtc_apm_bridge_create(int captureSampleRate,
     handle->captureFrameSize = captureSampleRate / 100; // 10ms
     handle->renderFrameSize = renderSampleRate / 100;   // 10ms
 
-    // Pre-allocate float buffer for the larger frame size.
-    int maxFrameSize = handle->captureFrameSize > handle->renderFrameSize
-                           ? handle->captureFrameSize
-                           : handle->renderFrameSize;
-    handle->floatBuf = new float[maxFrameSize];
-    handle->floatBufSize = maxFrameSize;
+    // Separate buffers — no shared state between threads.
+    handle->captureFloatBuf = new float[handle->captureFrameSize];
+    handle->renderFloatBuf = new float[handle->renderFrameSize];
 
     auto config = webrtc::AudioProcessing::Config();
 
@@ -86,7 +84,8 @@ void webrtc_apm_bridge_destroy(WebRtcApmHandle ptr) {
     if (handle) {
         os_log_info(apmLog(), "APM destroyed");
         delete handle->apm;
-        delete[] handle->floatBuf;
+        delete[] handle->captureFloatBuf;
+        delete[] handle->renderFloatBuf;
         delete handle;
     }
 }
@@ -109,7 +108,7 @@ void webrtc_apm_bridge_process_capture(WebRtcApmHandle ptr,
     int frameSize = handle->captureFrameSize;
     if (frameSize <= 0) return;
 
-    float* floatBuf = handle->floatBuf;
+    float* floatBuf = handle->captureFloatBuf;
 
     int offset = 0;
     while (offset + frameSize <= totalSamples) {
@@ -152,7 +151,7 @@ void webrtc_apm_bridge_process_render(WebRtcApmHandle ptr,
     int frameSize = handle->renderFrameSize;
     if (frameSize <= 0) return;
 
-    float* floatBuf = handle->floatBuf;
+    float* floatBuf = handle->renderFloatBuf;
 
     int offset = 0;
     while (offset + frameSize <= totalSamples) {

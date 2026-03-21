@@ -13,11 +13,24 @@ class RealtimeAudioSession {
     #endif
   }
 
-  func configure(recorderEnabled: Bool) throws {
+  /// Configure the audio session.
+  ///
+  /// - Parameters:
+  ///   - recorderEnabled: Whether mic recording is active.
+  ///   - useWebRtcApm: When true, avoids `.voiceChat` mode and system-level
+  ///     echo cancellation to prevent double-processing with WebRTC APM.
+  func configure(recorderEnabled: Bool, useWebRtcApm: Bool = false) throws {
     #if os(iOS)
       if !recorderEnabled {
         try instance.setCategory(.playback, mode: .spokenAudio, options: [.duckOthers])
         try instance.setPreferredInputOrientation(.portrait)
+      } else if useWebRtcApm {
+        // WebRTC APM handles AEC/NS/AGC — use .default mode to avoid
+        // system-level voice processing that would conflict.
+        try instance.setCategory(
+          .playAndRecord, mode: .default, options: [.defaultToSpeaker, .allowBluetooth, .duckOthers])
+        try instance.setPreferredInputOrientation(.portrait)
+        try instance.setAllowHapticsAndSystemSoundsDuringRecording(false)
       } else {
         try instance.setCategory(
           .playAndRecord, mode: .voiceChat, options: [.defaultToSpeaker, .allowBluetooth, .duckOthers])
