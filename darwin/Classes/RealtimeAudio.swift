@@ -58,12 +58,6 @@ class RealtimeAudio: NSObject {
     /// the `voiceProcessing` argument is true.
     private var webRtcApm: WebRtcApm?
 
-    /// Format used to convert the output tap's float32 audio to int16 for
-    /// processRender. Matches the actual speaker output sample rate.
-    private var renderTapFormat: AVAudioFormat?
-
-    /// Converter for output tap: float32 at device rate → int16 at device rate.
-    private var renderTapConverter: AVAudioConverter?
   #endif
 
   private var shouldBeStarted = false
@@ -160,9 +154,6 @@ class RealtimeAudio: NSObject {
       let delayMs = min(300, max(20, Int(((outputLatency + inputLatency + ioBuffer * 2) * 1000).rounded())))
       apm.setStreamDelay(delayMs)
 
-      // Prepare the int16 format at device output rate for the render tap converter.
-      renderTapFormat = getAudioFormat(.pcmFormatInt16, actualOutputRate, 1)
-
       webRtcApm = apm
       methodChannel.invokeMethod("echo", arguments:
         "WebRTC APM initialized (delay=\(delayMs)ms, renderRate=\(Int(actualOutputRate))Hz, " +
@@ -242,6 +233,8 @@ class RealtimeAudio: NSObject {
 
     #if os(iOS)
       audioSession.instance.removeObserver(self, forKeyPath: "outputVolume")
+      removeOutputTap()
+      audioEngine.inputNode.removeTap(onBus: recorderPreferredBus)
       webRtcApm?.release()
       webRtcApm = nil
     #endif
@@ -256,6 +249,13 @@ class RealtimeAudio: NSObject {
 
   func dispose() throws {
     isDisposed = true
+
+    // Remove taps BEFORE releasing APM to prevent use-after-free in
+    // in-flight tap callbacks.
+    #if os(iOS)
+      removeOutputTap()
+    #endif
+    audioEngine.inputNode.removeTap(onBus: recorderPreferredBus)
 
     #if os(iOS)
       webRtcApm?.release()
@@ -593,26 +593,24 @@ extension RealtimeAudio {
         guard let self, let apm = self.webRtcApm else { return }
         if self.shouldBePaused || self.isDisposed { return }
 
-        // Convert float32 buffer to int16 bytes for processRender.
+        // Convert float32 buffer to int16 for processRender.
         let frameLength = Int(buffer.frameLength)
         guard frameLength > 0, let floatData = buffer.floatChannelData?[0] else { return }
 
-        // Direct float32-to-int16 conversion (no AVAudioConverter needed for
-        // same-sample-rate format change).
-        let byteCount = frameLength * 2
-        var int16Data = [Int8](repeating: 0, count: byteCount)
-        int16Data.withUnsafeMutableBufferPointer { ptr in
-          let int16Ptr = UnsafeMutableRawPointer(ptr.baseAddress!).bindMemory(to: Int16.self, capacity: frameLength)
-          for i in 0..<frameLength {
-            var val = floatData[i] * 32768.0
-            if val > 32767.0 { val = 32767.0 }
-            if val < -32768.0 { val = -32768.0 }
-            int16Ptr[i] = Int16(val)
-          }
+        var int16Data = [Int16](repeating: 0, count: frameLength)
+        for i in 0..<frameLength {
+          var val = floatData[i]
+          if val.isNaN { val = 0.0 }
+          val *= 32768.0
+          val = min(32767.0, max(-32768.0, val))
+          int16Data[i] = Int16(val)
         }
 
+        let byteCount = frameLength * 2
         int16Data.withUnsafeBufferPointer { ptr in
-          apm.processRender(ptr.baseAddress!, length: byteCount)
+          ptr.baseAddress!.withMemoryRebound(to: Int8.self, capacity: byteCount) { int8Ptr in
+            apm.processRender(int8Ptr, length: byteCount)
+          }
         }
       }
     }
@@ -749,6 +747,13 @@ extension RealtimeAudio {
     stopAudio()
     #if os(iOS)
       removeOutputTap()
+      // Re-initialize APM to pick up any sample rate changes (e.g., Bluetooth
+      // connected/disconnected changes the device hardware rate).
+      if arguments.voiceProcessing && isRecorderEnabled {
+        webRtcApm?.release()
+        webRtcApm = nil
+        initializeApm()
+      }
     #endif
     audioEngine.stop()
     audioEngine.reset()

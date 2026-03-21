@@ -2,6 +2,7 @@
 #include "webrtc/modules/audio_processing/include/audio_processing.h"
 #include <cstring>
 #include <os/log.h>
+#include <pthread.h>
 
 static os_log_t apmLog() {
     static os_log_t log = os_log_create("dev.volskaya.realtime_audio", "APM");
@@ -17,9 +18,13 @@ struct ApmHandle {
     int streamDelayMs = 100;  // estimated audio pipeline delay
 
     // Separate float buffers for capture and render to avoid data races
-    // (processCapture runs on the audio thread, processRender on the main thread).
+    // (processCapture and processRender run on different audio threads).
     float* captureFloatBuf = nullptr;
     float* renderFloatBuf = nullptr;
+
+    // Mutex serializing all APM calls. ProcessStream and ProcessReverseStream
+    // must not run concurrently per WebRTC documentation.
+    pthread_mutex_t mutex;
 };
 
 extern "C" {
@@ -30,8 +35,16 @@ WebRtcApmHandle webrtc_apm_bridge_create(int captureSampleRate,
                                          bool nsEnabled,
                                          bool agcEnabled) {
     auto* handle = new ApmHandle();
+
+    pthread_mutexattr_t attr;
+    pthread_mutexattr_init(&attr);
+    pthread_mutexattr_setprotocol(&attr, PTHREAD_PRIO_INHERIT);
+    pthread_mutex_init(&handle->mutex, &attr);
+    pthread_mutexattr_destroy(&attr);
+
     handle->apm = webrtc::AudioProcessingBuilder().Create();
     if (!handle->apm) {
+        pthread_mutex_destroy(&handle->mutex);
         delete handle;
         return nullptr;
     }
@@ -81,13 +94,22 @@ WebRtcApmHandle webrtc_apm_bridge_create(int captureSampleRate,
 
 void webrtc_apm_bridge_destroy(WebRtcApmHandle ptr) {
     auto* handle = static_cast<ApmHandle*>(ptr);
-    if (handle) {
-        os_log_info(apmLog(), "APM destroyed");
-        delete handle->apm;
-        delete[] handle->captureFloatBuf;
-        delete[] handle->renderFloatBuf;
-        delete handle;
-    }
+    if (!handle) return;
+
+    // Lock to drain any in-flight processCapture/processRender calls.
+    pthread_mutex_lock(&handle->mutex);
+    delete handle->apm;
+    handle->apm = nullptr;
+    delete[] handle->captureFloatBuf;
+    handle->captureFloatBuf = nullptr;
+    delete[] handle->renderFloatBuf;
+    handle->renderFloatBuf = nullptr;
+    pthread_mutex_unlock(&handle->mutex);
+
+    pthread_mutex_destroy(&handle->mutex);
+    delete handle;
+
+    os_log_info(apmLog(), "APM destroyed");
 }
 
 void webrtc_apm_bridge_set_stream_delay(WebRtcApmHandle ptr, int delayMs) {
@@ -101,12 +123,22 @@ void webrtc_apm_bridge_process_capture(WebRtcApmHandle ptr,
                                        int8_t* audioData,
                                        int dataLen) {
     auto* handle = static_cast<ApmHandle*>(ptr);
-    if (!handle || !handle->apm || dataLen == 0) return;
+    if (!handle || dataLen == 0) return;
+
+    pthread_mutex_lock(&handle->mutex);
+
+    if (!handle->apm || !handle->captureFloatBuf) {
+        pthread_mutex_unlock(&handle->mutex);
+        return;
+    }
 
     auto* inputSamples = reinterpret_cast<int16_t*>(audioData);
     int totalSamples = dataLen / 2;
     int frameSize = handle->captureFrameSize;
-    if (frameSize <= 0) return;
+    if (frameSize <= 0) {
+        pthread_mutex_unlock(&handle->mutex);
+        return;
+    }
 
     float* floatBuf = handle->captureFloatBuf;
 
@@ -138,18 +170,30 @@ void webrtc_apm_bridge_process_capture(WebRtcApmHandle ptr,
 
         offset += frameSize;
     }
+
+    pthread_mutex_unlock(&handle->mutex);
 }
 
 void webrtc_apm_bridge_process_render(WebRtcApmHandle ptr,
                                       const int8_t* audioData,
                                       int dataLen) {
     auto* handle = static_cast<ApmHandle*>(ptr);
-    if (!handle || !handle->apm || dataLen == 0) return;
+    if (!handle || dataLen == 0) return;
+
+    pthread_mutex_lock(&handle->mutex);
+
+    if (!handle->apm || !handle->renderFloatBuf) {
+        pthread_mutex_unlock(&handle->mutex);
+        return;
+    }
 
     auto* inputSamples = reinterpret_cast<const int16_t*>(audioData);
     int totalSamples = dataLen / 2;
     int frameSize = handle->renderFrameSize;
-    if (frameSize <= 0) return;
+    if (frameSize <= 0) {
+        pthread_mutex_unlock(&handle->mutex);
+        return;
+    }
 
     float* floatBuf = handle->renderFloatBuf;
 
@@ -169,6 +213,8 @@ void webrtc_apm_bridge_process_render(WebRtcApmHandle ptr,
 
         offset += frameSize;
     }
+
+    pthread_mutex_unlock(&handle->mutex);
 }
 
 } // extern "C"
