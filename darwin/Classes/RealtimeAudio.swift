@@ -224,7 +224,15 @@ class RealtimeAudio: NSObject {
   private func changeVolume() {
     if !isRecorderEnabled { return }
     #if os(iOS)
-      audioEngine.mainMixerNode.outputVolume = audioSession.instance.outputVolume
+      let systemVolume = audioSession.instance.outputVolume
+      if webRtcApmActive {
+        // Cap output volume when AEC is active to prevent mic saturation.
+        // At high volume, the speaker-to-mic coupling drives the raw mic ADC
+        // into clipping, which destroys AEC3's linear filter correlation.
+        audioEngine.mainMixerNode.outputVolume = min(systemVolume, 0.6)
+      } else {
+        audioEngine.mainMixerNode.outputVolume = systemVolume
+      }
     #endif
   }
 
@@ -573,19 +581,19 @@ extension RealtimeAudio {
     }
   }
 
-  /// Install a tap on the main mixer to capture the actual speaker output for
-  /// the APM's echo reference (processRender). This ensures the AEC sees
-  /// exactly what the speaker plays, at the right time, after all format
-  /// conversion and mixing.
+  /// Install a tap on the custom mixer (audioMixerNode) to capture the speaker
+  /// output for the APM's echo reference (processRender). Tapping audioMixerNode
+  /// instead of mainMixerNode gives us the mixed audio BEFORE volume scaling,
+  /// so the render reference isn't affected by the volume cap.
   #if os(iOS)
     private func installOutputTap() throws {
       guard webRtcApmActive else { return }
 
-      let mixerFormat = audioEngine.mainMixerNode.outputFormat(forBus: 0)
+      let mixerFormat = audioMixerNode.outputFormat(forBus: 0)
       // 10ms of audio at the mixer's sample rate — matches APM's frame size.
       let tapBufferSize = AVAudioFrameCount(mixerFormat.sampleRate / 100)
 
-      audioEngine.mainMixerNode.installTap(
+      audioMixerNode.installTap(
         onBus: 0,
         bufferSize: tapBufferSize,
         format: mixerFormat
@@ -616,7 +624,7 @@ extension RealtimeAudio {
     }
 
     private func removeOutputTap() {
-      audioEngine.mainMixerNode.removeTap(onBus: 0)
+      audioMixerNode.removeTap(onBus: 0)
     }
   #endif
 
