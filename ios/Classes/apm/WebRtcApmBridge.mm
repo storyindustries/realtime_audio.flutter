@@ -60,10 +60,11 @@ WebRtcApmHandle webrtc_apm_bridge_create(int captureSampleRate,
 
     auto config = webrtc::AudioProcessing::Config();
 
-    // Echo cancellation — mobile mode uses AECM which is lighter and
-    // designed for the strong echo coupling on mobile speakerphones.
+    // Echo cancellation — AEC3 (full mode) with built-in delay estimator.
+    // AEC3 finds the render-to-capture delay itself via matched-filter
+    // cross-correlation, eliminating dependence on set_stream_delay_ms.
     config.echo_canceller.enabled = aecEnabled;
-    config.echo_canceller.mobile_mode = true;
+    config.echo_canceller.mobile_mode = false;
     config.echo_canceller.enforce_high_pass_filtering = true;
 
     // Noise suppression at very high level for voice calls.
