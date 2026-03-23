@@ -98,7 +98,8 @@ class RealtimeAudio: NSObject {
 
     //
 
-    // Create APM BEFORE attachNodes so the voice processing decision is correct.
+    // Initialize WebRTC APM for noise suppression and AGC only (no AEC).
+    // Apple's VoiceProcessingIO handles echo cancellation at the hardware level.
     #if os(iOS)
       if arguments.voiceProcessing && isRecorderEnabled {
         initializeApm()
@@ -109,69 +110,44 @@ class RealtimeAudio: NSObject {
     audioPlayerNode.setListener(self)
     methodChannel.setMethodCallHandler(handleFlutterMethod)
 
-    try audioSession.configure(
-      recorderEnabled: isRecorderEnabled,
-      useWebRtcApm: webRtcApmActive
-    )
+    try audioSession.configure(recorderEnabled: isRecorderEnabled)
     try attachNodes()
     try audioSession.activate()
 
     changeVolume()
 
     try installTap()
-    #if os(iOS)
-      try installOutputTap()
-    #endif
     audioEngine.prepare()
   }
 
   #if os(iOS)
-    /// Whether the WebRTC APM is active and should handle AEC.
+    /// Whether the WebRTC APM is active (NS + AGC processing).
     private var webRtcApmActive: Bool { webRtcApm?.isAvailable == true }
 
-    /// Initialize the WebRTC APM with the actual output sample rate and proper
-    /// stream delay estimation.
+    /// Initialize the WebRTC APM for noise suppression and AGC only.
+    /// AEC is disabled — Apple's VoiceProcessingIO handles echo cancellation
+    /// at the hardware level with per-device acoustic models.
     private func initializeApm() {
-      // Use the actual device output sample rate for the render config so the
-      // AEC reference matches what the speaker physically outputs.
-      let actualOutputRate = audioSession.sampleRate ?? playerSampleRate
-
       let apm = WebRtcApm(
         captureSampleRate: Int(recorderSampleRate),
-        renderSampleRate: Int(actualOutputRate),
-        aecEnabled: true,
+        renderSampleRate: Int(playerSampleRate),
+        aecEnabled: false,
         nsEnabled: true,
         agcEnabled: true
       )
       guard apm.isAvailable else { return }
-
-      // Stream delay = time from processRender call to when mic picks up the echo.
-      // With the output tap, processRender is called when audio is being rendered
-      // (not when it's queued), so the delay is much smaller and more predictable.
-      let outputLatency = audioSession.instance.outputLatency
-      let inputLatency = audioSession.instance.inputLatency
-      let ioBuffer = audioSession.instance.ioBufferDuration
-      let delayMs = min(300, max(20, Int(((outputLatency + inputLatency + ioBuffer * 2) * 1000).rounded())))
-      apm.setStreamDelay(delayMs)
-
       webRtcApm = apm
-      methodChannel.invokeMethod("echo", arguments:
-        "WebRTC APM initialized (delay=\(delayMs)ms, renderRate=\(Int(actualOutputRate))Hz, " +
-        "outputLatency=\(Int(outputLatency * 1000))ms, inputLatency=\(Int(inputLatency * 1000))ms)")
+      methodChannel.invokeMethod("echo", arguments: "WebRTC APM initialized (NS + AGC only, Apple VP handles AEC)")
     }
   #endif
 
   private func attachNodes() throws {
     #if os(iOS)
       if isRecorderEnabled {
-        // When WebRTC APM is active, it handles AEC/NS/AGC in software — skip
-        // Apple's built-in voice processing to avoid double-processing.
-        let useAppleVP = !webRtcApmActive
-        try audioEngine.outputNode.setVoiceProcessingEnabled(useAppleVP)
-        try audioEngine.inputNode.setVoiceProcessingEnabled(useAppleVP)
-        if useAppleVP {
-          audioEngine.inputNode.isVoiceProcessingAGCEnabled = false
-        }
+        // Apple's VoiceProcessingIO handles AEC at the hardware level.
+        try audioEngine.outputNode.setVoiceProcessingEnabled(true)
+        try audioEngine.inputNode.setVoiceProcessingEnabled(true)
+        audioEngine.inputNode.isVoiceProcessingAGCEnabled = false
       }
     #endif
 
@@ -224,15 +200,7 @@ class RealtimeAudio: NSObject {
   private func changeVolume() {
     if !isRecorderEnabled { return }
     #if os(iOS)
-      let systemVolume = audioSession.instance.outputVolume
-      if webRtcApmActive {
-        // Cap output volume when AEC is active to prevent mic saturation.
-        // At high volume, the speaker-to-mic coupling drives the raw mic ADC
-        // into clipping, which destroys AEC3's linear filter correlation.
-        audioEngine.mainMixerNode.outputVolume = min(systemVolume, 0.6)
-      } else {
-        audioEngine.mainMixerNode.outputVolume = systemVolume
-      }
+      audioEngine.mainMixerNode.outputVolume = audioSession.instance.outputVolume
     #endif
   }
 
@@ -241,7 +209,6 @@ class RealtimeAudio: NSObject {
 
     #if os(iOS)
       audioSession.instance.removeObserver(self, forKeyPath: "outputVolume")
-      removeOutputTap()
       audioEngine.inputNode.removeTap(onBus: recorderPreferredBus)
       webRtcApm?.release()
       webRtcApm = nil
@@ -258,11 +225,7 @@ class RealtimeAudio: NSObject {
   func dispose() throws {
     isDisposed = true
 
-    // Remove taps BEFORE releasing APM to prevent use-after-free in
-    // in-flight tap callbacks.
-    #if os(iOS)
-      removeOutputTap()
-    #endif
+    // Remove tap BEFORE releasing APM to prevent use-after-free.
     audioEngine.inputNode.removeTap(onBus: recorderPreferredBus)
 
     #if os(iOS)
@@ -498,8 +461,7 @@ extension RealtimeAudio: ChunkAudioEventListener {
   private func queueAudio(_ id: String, _ data: [UInt8]) throws {
     if data.isEmpty { return }
 
-    // No processRender here — the output tap feeds the actual speaker audio
-    // to the APM in real time (see installOutputTap).
+    // No processRender — APM handles NS + AGC only, Apple VP handles AEC.
 
     try audioPlayerNode.queue(id, data)
     if !state.isPaused { playAudio() }
@@ -581,52 +543,8 @@ extension RealtimeAudio {
     }
   }
 
-  /// Install a tap on the custom mixer (audioMixerNode) to capture the speaker
-  /// output for the APM's echo reference (processRender). Tapping audioMixerNode
-  /// instead of mainMixerNode gives us the mixed audio BEFORE volume scaling,
-  /// so the render reference isn't affected by the volume cap.
-  #if os(iOS)
-    private func installOutputTap() throws {
-      guard webRtcApmActive else { return }
-
-      let mixerFormat = audioMixerNode.outputFormat(forBus: 0)
-      // 10ms of audio at the mixer's sample rate — matches APM's frame size.
-      let tapBufferSize = AVAudioFrameCount(mixerFormat.sampleRate / 100)
-
-      audioMixerNode.installTap(
-        onBus: 0,
-        bufferSize: tapBufferSize,
-        format: mixerFormat
-      ) { [weak self] (buffer, time) -> Void in
-        guard let self, let apm = self.webRtcApm else { return }
-        if self.shouldBePaused || self.isDisposed { return }
-
-        // Convert float32 buffer to int16 for processRender.
-        let frameLength = Int(buffer.frameLength)
-        guard frameLength > 0, let floatData = buffer.floatChannelData?[0] else { return }
-
-        var int16Data = [Int16](repeating: 0, count: frameLength)
-        for i in 0..<frameLength {
-          var val = floatData[i]
-          if val.isNaN { val = 0.0 }
-          val *= 32768.0
-          val = min(32767.0, max(-32768.0, val))
-          int16Data[i] = Int16(val)
-        }
-
-        let byteCount = frameLength * 2
-        int16Data.withUnsafeBufferPointer { ptr in
-          ptr.baseAddress!.withMemoryRebound(to: Int8.self, capacity: byteCount) { int8Ptr in
-            apm.processRender(int8Ptr, length: byteCount)
-          }
-        }
-      }
-    }
-
-    private func removeOutputTap() {
-      audioMixerNode.removeTap(onBus: 0)
-    }
-  #endif
+  // No output tap needed — APM handles NS + AGC only, not AEC.
+  // Apple's VoiceProcessingIO handles echo cancellation at the hardware level.
 
   private func handleRecorderData(_ buffer: AVAudioPCMBuffer) {
     // Convert buffer to UInt8 list.
@@ -642,7 +560,7 @@ extension RealtimeAudio {
       }
     }
 
-    // Process captured audio through WebRTC APM (echo cancellation, NS, AGC).
+    // Process captured audio through WebRTC APM (noise suppression + AGC).
     #if os(iOS)
       if let apm = webRtcApm {
         data.withUnsafeMutableBufferPointer { ptr in
@@ -718,13 +636,10 @@ extension RealtimeAudio {
     stopBackground()
     stopAudio()
     notifyRecorderVolume()
-    #if os(iOS)
-      removeOutputTap()
-    #endif
     audioEngine.stop()
   }
 
-  /// Dynamically toggle the recorder (and voice processing / AEC) without
+  /// Dynamically toggle the recorder (and voice processing) without
   /// disposing the engine. Triggers an internal restart to reconfigure the
   /// audio session and engine nodes.
   func setRecorderEnabled(_ enabled: Bool) throws {
@@ -735,16 +650,12 @@ extension RealtimeAudio {
       if enabled && arguments.voiceProcessing && webRtcApm == nil {
         initializeApm()
       } else if !enabled {
-        removeOutputTap()
         webRtcApm?.release()
         webRtcApm = nil
       }
     #endif
 
-    try audioSession.configure(
-      recorderEnabled: enabled,
-      useWebRtcApm: webRtcApmActive
-    )
+    try audioSession.configure(recorderEnabled: enabled)
     try audioSession.activate()
     try restart()
   }
@@ -753,23 +664,10 @@ extension RealtimeAudio {
     if !shouldBeStarted { return }
     stopBackground(isRestart: true)
     stopAudio()
-    #if os(iOS)
-      removeOutputTap()
-      // Re-initialize APM to pick up any sample rate changes (e.g., Bluetooth
-      // connected/disconnected changes the device hardware rate).
-      if arguments.voiceProcessing && isRecorderEnabled {
-        webRtcApm?.release()
-        webRtcApm = nil
-        initializeApm()
-      }
-    #endif
     audioEngine.stop()
     audioEngine.reset()
     try attachNodes()
     try installTap()
-    #if os(iOS)
-      try installOutputTap()
-    #endif
     try start()
   }
 }
