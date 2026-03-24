@@ -1,4 +1,29 @@
 #import "WebRtcApmBridge.h"
+#include <TargetConditionals.h>
+
+#if TARGET_OS_SIMULATOR
+
+// Simulator stubs — WebRTC APM static library is device-only (arm64).
+// WebRtcApm.isAvailable will return false; all processing methods no-op.
+extern "C" {
+
+WebRtcApmHandle webrtc_apm_bridge_create(int captureSampleRate,
+                                         int renderSampleRate,
+                                         bool aecEnabled,
+                                         bool nsEnabled,
+                                         bool agcEnabled) {
+    return nullptr;
+}
+
+void webrtc_apm_bridge_destroy(WebRtcApmHandle handle) {}
+void webrtc_apm_bridge_set_stream_delay(WebRtcApmHandle handle, int delayMs) {}
+void webrtc_apm_bridge_process_capture(WebRtcApmHandle handle, int8_t* audioData, int dataLen) {}
+void webrtc_apm_bridge_process_render(WebRtcApmHandle handle, const int8_t* audioData, int dataLen) {}
+
+} // extern "C"
+
+#else // !TARGET_OS_SIMULATOR
+
 #include "webrtc/modules/audio_processing/include/audio_processing.h"
 #include <cstring>
 #include <os/log.h>
@@ -219,3 +244,5 @@ void webrtc_apm_bridge_process_render(WebRtcApmHandle ptr,
 }
 
 } // extern "C"
+
+#endif // !TARGET_OS_SIMULATOR
