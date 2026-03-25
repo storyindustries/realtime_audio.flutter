@@ -335,6 +335,11 @@ class RealtimeAudio(
       recorderFormat.encoding,
       bufferSize,
     ).also {
+      if (it.state != AudioRecord.STATE_INITIALIZED) {
+        it.release()
+        throw Error("AudioRecord failed to initialize (state=${it.state}). " +
+          "The device may not support $audioSource while audio playback is active.")
+      }
       recorderData = ShortArray(recorderChunkBufferSize)
       it.positionNotificationPeriod = recorderChunkBufferSize
       it.setRecordPositionUpdateListener(this)
