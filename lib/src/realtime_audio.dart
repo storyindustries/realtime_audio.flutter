@@ -73,6 +73,7 @@ class RealtimeAudio {
   final StreamController<double> _recorderVolumeStreamController = StreamController<double>();
   final StreamController<Uint8List> _recorderStreamController = StreamController<Uint8List>();
   final StreamController<RealtimeAudioState> _stateStreamController = StreamController<RealtimeAudioState>();
+  final StreamController<String> _recorderErrorStreamController = StreamController<String>.broadcast();
 
   Stream<Uint8List> get recorderStream => _recorderStreamController.stream;
   Stream<RealtimeAudioState> get stateStream => _stateStreamController.stream;
@@ -82,6 +83,11 @@ class RealtimeAudio {
 
   /// Recorder volume in dBFS, clamped from -96 to 0.
   Stream<double> get recorderVolumeStream => _recorderVolumeStreamController.stream;
+
+  /// Native recorder errors (e.g. AVAudioConverter failures, Android
+  /// AudioRecord state errors). Broadcast so it can be subscribed to
+  /// independently of the recorder data stream.
+  Stream<String> get recorderErrorStream => _recorderErrorStreamController.stream;
 
   String? _id;
   MethodChannel? _channel;
@@ -137,6 +143,15 @@ class RealtimeAudio {
         break;
       case 'recorderData':
         _recorderStreamController.sink.add(call.arguments as Uint8List);
+        break;
+      case 'recorderError':
+        final message = call.arguments is String ? call.arguments as String : '${call.arguments}';
+        if (kDebugMode) {
+          print("RealtimeAudio recorderError: $message"); // ignore: avoid_print
+        }
+        if (!_recorderErrorStreamController.isClosed) {
+          _recorderErrorStreamController.sink.add(message);
+        }
         break;
       case 'chunkQueued':
         handleChunkQueued(call.arguments as String);
@@ -329,6 +344,8 @@ class RealtimeAudio {
         _playerVolumeStreamController.sink.close();
         _recorderStreamController.close();
         _recorderStreamController.sink.close();
+        _recorderErrorStreamController.close();
+        _recorderErrorStreamController.sink.close();
         _stateStreamController.close();
         _stateStreamController.sink.close();
         if (_id != null) await RealtimeAudioArguments.destroy(id: _id!).invoke(_staticChannel);
