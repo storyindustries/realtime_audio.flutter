@@ -11,6 +11,43 @@ class ChunkAudioPlayerNode: AVAudioPlayerNode {
   private var converter: AVAudioConverter? = nil
   private weak var listener: ChunkAudioEventListener? = nil
 
+  /// True between `play()` and `stop()` — i.e. the node is rendering or paused
+  /// (holding position), false once stopped/flushed. Gates whether the render
+  /// clock reads the live playback head or the latched value.
+  private(set) var isPlaybackActive = false
+
+  /// Last device-truth rendered milliseconds, latched so it survives the
+  /// playback-head reset that `stop()` performs.
+  private var latchedPlayedMs = 0
+
+  /// Live playback-head position in ms, or nil if the node isn't currently
+  /// mapping node time (e.g. stopped). Derived from `playerTime` — the platform
+  /// render clock — so it is independent of per-buffer completion callbacks.
+  private func liveHeadMs() -> Int? {
+    guard let lastTime = lastRenderTime, let time = playerTime(forNodeTime: lastTime) else { return nil }
+    return RenderClock.framesToMs(sampleTime: time.sampleTime, sampleRate: time.sampleRate)
+  }
+
+  /// Device-truth milliseconds rendered for the current/last stream. Advances
+  /// while rendering, holds while paused, and latches across stop/flush so a
+  /// post-drain read still reports what the device actually played.
+  var playedMs: Int {
+    if isPlaybackActive, let ms = liveHeadMs() {
+      latchedPlayedMs = ms
+      return ms
+    }
+    return latchedPlayedMs
+  }
+
+  /// Whether the device is actively rendering queued PCM ahead of the head
+  /// (false when paused, stalled, drained, or stopped).
+  var isRenderingPlayback: Bool {
+    guard isPlaybackActive, let lastTime = lastRenderTime, let time = playerTime(forNodeTime: lastTime) else {
+      return false
+    }
+    return time.sampleTime < Int64(totalSampleTime)
+  }
+
   init(
     inputFormat: AVAudioFormat,
     outputFormat: AVAudioFormat
@@ -63,10 +100,16 @@ class ChunkAudioPlayerNode: AVAudioPlayerNode {
       listener?.onChunkQueueStarted(firstChunkId)
     }
 
+    isPlaybackActive = true
     super.play()
   }
 
   override func stop() {
+    // Latch the device-truth rendered position BEFORE super.stop() resets the
+    // node's playback head, so a post-stop / post-drain read still reports it.
+    if isPlaybackActive, let ms = liveHeadMs() { latchedPlayedMs = ms }
+    isPlaybackActive = false
+
     isChunkQueueStartedNeeded = true
     super.stop()
 
