@@ -49,6 +49,34 @@ void main() {
       expect(clock.renderClock, const Duration(milliseconds: 3820));
     });
 
+    test('barrel exposes RealtimeAudioInstanceResponseClearQueue with the folded clock', () {
+      // Named directly from the package barrel — consumers must be able to type
+      // clearQueue()'s response (and its .clock) without an implementation import.
+      final RealtimeAudioInstanceResponseClearQueue response =
+          RealtimeAudioInstanceResponseClearQueue.fromJson(const {
+        'chunk': {
+          'id': 'chunk-1',
+          'sampleRate': 24000.0,
+          'sampleTime': 2400,
+          'sampleTimeTotal': 4800,
+          'chunkSampleTime': 1200,
+          'chunkSampleTimeTotal': 2400,
+        },
+        'clock': {
+          'renderClockMs': 1900,
+          'renderedMs': 1850,
+          'scheduledMs': 4000,
+          'isRendering': false,
+        },
+      });
+
+      final RealtimeAudioClearQueueChunkData? chunk = response.chunk;
+      final RealtimeAudioPlaybackClock? clock = response.clock;
+      expect(chunk?.id, 'chunk-1');
+      expect(clock?.renderClockMs, 1900);
+      expect(clock?.scheduledMs, 4000);
+    });
+
     test('RealtimeAudioEchoCancellationState trust predicate follows bubbles', () {
       RealtimeAudioEchoCancellationState decode(Map<String, dynamic> json) =>
           RealtimeAudioEchoCancellationState.fromJson(json);

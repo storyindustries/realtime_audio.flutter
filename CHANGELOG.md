@@ -21,6 +21,9 @@
   `{ requested, nativeEnabled, mechanism (webrtcApm|platformAec|none),
   captureProvenLive, trustsFullDuplex }` so consumers can decide whether
   full-duplex can be trusted (never assumed).
+* Export `RealtimeAudioInstanceResponse` / `RealtimeAudioInstanceResponseClearQueue`
+  (+ `RealtimeAudioClearQueueChunkData`) from the package barrel so consumers can
+  type `clearQueue()`'s response and read `.clock` without an implementation import.
 * Wire a JUnit 5 engine so the Android unit tests run under `useJUnitPlatform()`.
 
 ## 0.0.12
