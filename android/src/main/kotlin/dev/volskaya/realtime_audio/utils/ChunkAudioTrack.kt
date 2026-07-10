@@ -6,6 +6,7 @@ import android.media.AudioTrack
 import android.os.Handler
 import android.os.Looper
 import dev.volskaya.realtime_audio.QueuedChunk
+import dev.volskaya.realtime_audio.RenderClock
 import dev.volskaya.realtime_audio.getBitRatio
 import java.lang.ref.WeakReference
 
@@ -36,6 +37,36 @@ class ChunkAudioTrack(
   val dataPlaybackHeadPosition: Int get() = playbackHeadPosition * bitRatio
   val dataSampleRate: Int get() = sampleRate * bitRatio
 
+  /// True between play() and stop() — the track is rendering or paused (holding
+  /// position), false once stopped/flushed. Gates whether the render clock reads
+  /// the live playback head or the latched value.
+  var isPlaybackActive = false
+    private set
+
+  /// Last device-truth rendered milliseconds, latched so it survives the
+  /// playback-head reset that stop()/flush() performs.
+  private var latchedPlayedMs = 0
+
+  /// Wrap-safe playback-head position in frames (see [RenderClock.renderedFrames]).
+  val renderedFramesNow: Long get() = RenderClock.renderedFrames(playbackHeadPosition)
+
+  /// Device-truth milliseconds rendered for the current/last stream. Advances
+  /// while rendering, holds while paused, and latches across stop/flush so a
+  /// post-drain read still reports what the device actually played. Derived from
+  /// the playback head, NOT from per-chunk completion callbacks.
+  val playedMs: Int
+    get() {
+      val live = if (isPlaybackActive) RenderClock.framesToMs(renderedFramesNow, sampleRate) else null
+      val resolution = RenderClock.resolvePlayedMs(isPlaybackActive, live, latchedPlayedMs)
+      latchedPlayedMs = resolution.latchedMs
+      return resolution.renderedMs
+    }
+
+  /// Whether the device is actively rendering queued PCM ahead of the head
+  /// (false when paused, stalled, drained, or stopped).
+  val isRenderingPlayback: Boolean
+    get() = isPlaybackActive && renderedFramesNow < totalSampleTime.toLong()
+
   fun queue(id: String, data: ByteArray) {
     if (data.isEmpty()) return
 
@@ -57,6 +88,7 @@ class ChunkAudioTrack(
       }
     }
 
+    isPlaybackActive = true
     super.play()
     thread = thread ?: Thread {
       val currentThread = Thread.currentThread()
@@ -109,6 +141,13 @@ class ChunkAudioTrack(
   }
 
   override fun stop() {
+    // Latch the device-truth rendered position BEFORE super.stop()/flush() reset
+    // the playback head, so a post-stop / post-drain read still reports it.
+    if (isPlaybackActive) {
+      latchedPlayedMs = RenderClock.framesToMs(renderedFramesNow, sampleRate)
+    }
+    isPlaybackActive = false
+
     thread?.interrupt()
     thread = null
     isChunkQueueStartedNeeded = true
