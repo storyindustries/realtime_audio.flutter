@@ -86,6 +86,12 @@ class RealtimeAudio(
   private var shouldBeRunning = false
   private var shouldBePaused = false
 
+  /// Whether the mic capture path has delivered its first real buffer since
+  /// recording (re)started — bubbles' `captureProvenLive`. Read back via
+  /// `getEchoCancellationState`. Monotonic false→true within a capture session.
+  @Volatile
+  private var captureProvenLive = false
+
   private var playerProgressTimer: Timer? = null
   private var playerVolumeTimer: Timer? = null
   private var state: RealtimeAudioState = RealtimeAudioState(
@@ -194,6 +200,9 @@ class RealtimeAudio(
         stopAudio()
       }
 
+      "getPlayerPlayedDuration" -> value = playbackClockMap()
+      "getEchoCancellationState" -> value = echoCancellationStateMap()
+
       "start" -> start()
       "pause" -> pause()
       "resume" -> resume()
@@ -239,6 +248,8 @@ class RealtimeAudio(
 
     state.duration = (seconds * 1000).roundToInt()
     state.durationTotal = (secondsTotal * 1000).roundToInt()
+    state.renderedMs = audioTrack.playedMs
+    state.isRendering = audioTrack.isRenderingPlayback
 
     notifyState()
   }
@@ -250,6 +261,8 @@ class RealtimeAudio(
     state.isPaused = audioTrack.playState == AudioTrack.PLAYSTATE_PAUSED
     state.isPlaying =
       audioTrack.playState == AudioTrack.PLAYSTATE_PAUSED || audioTrack.playState == AudioTrack.PLAYSTATE_PLAYING
+    state.renderedMs = audioTrack.playedMs
+    state.isRendering = audioTrack.isRenderingPlayback
 
     notifyState()
   }
@@ -270,6 +283,34 @@ class RealtimeAudio(
 
   private fun notifyRecorderVolume(volume: Double? = null) {
     methodChannel.invokeMethod("recorderVolume", volume ?: -96.0)
+  }
+
+  /// Snapshot of the completion-independent render clock — see
+  /// [ChunkAudioTrack.playedMs].
+  private fun playbackClockMap(): Map<String, Any> = mapOf(
+    "renderedMs" to audioTrack.playedMs,
+    "isRendering" to audioTrack.isRenderingPlayback,
+    "durationTotalMs" to RenderClock.framesToMs(audioTrack.totalSampleTime.toLong(), audioTrack.sampleRate),
+  )
+
+  /// Live read-back of the AEC path. On Android, AEC is the bundled WebRTC APM
+  /// (software) when available; otherwise the engine relies on the platform
+  /// VOICE_COMMUNICATION capture source, whose liveness cannot be read back.
+  /// `nativeEnabled` reflects the APM path rather than assuming it.
+  private fun echoCancellationStateMap(): Map<String, Any> {
+    val apmLive = webRtcApm?.isAvailable == true
+    val mechanism = when {
+      apmLive -> "webRtcApm"
+      isRecorderEnabled && arguments.voiceProcessing -> "platformVoiceCommunication"
+      else -> "none"
+    }
+
+    return mapOf(
+      "requested" to arguments.voiceProcessing,
+      "nativeEnabled" to apmLive,
+      "mechanism" to mechanism,
+      "captureProvenLive" to captureProvenLive,
+    )
   }
 
   //
@@ -405,6 +446,8 @@ class RealtimeAudio(
   private fun startRecording() {
     val rec = recorder ?: return
     if (rec.recordingState == AudioRecord.RECORDSTATE_RECORDING) return
+    // New capture session — liveness is unproven until the first buffer arrives.
+    captureProvenLive = false
     rec.startRecording()
     onPeriodicNotification(rec)
   }
@@ -450,6 +493,8 @@ class RealtimeAudio(
         }
 
         bytes.getOrNull()?.array()?.let { buffer ->
+          // First real capture buffer proves the mic path is live.
+          captureProvenLive = true
           val processed = webRtcApm?.processCapture(buffer) ?: buffer
           val dbfs = getDbfsFromByteArrays(listOf(processed), 0, processed.size)
           scope.launch {
@@ -529,6 +574,7 @@ class RealtimeAudio(
       recorder?.release()
       recorder = null
       recorderData = null
+      captureProvenLive = false
       webRtcApm?.release()
       webRtcApm = null
     }

@@ -69,7 +69,10 @@ android {
     }
 
     dependencies {
-        testImplementation("org.jetbrains.kotlin:kotlin-test")
+        // kotlin-test-junit5 maps kotlin.test annotations onto the JUnit Platform
+        // (useJUnitPlatform below); the jupiter engine is needed at test runtime.
+        testImplementation("org.jetbrains.kotlin:kotlin-test-junit5:$kotlin_version")
+        testRuntimeOnly("org.junit.jupiter:junit-jupiter-engine:5.10.2")
         testImplementation("org.mockito:mockito-core:5.0.0")
     }
 
