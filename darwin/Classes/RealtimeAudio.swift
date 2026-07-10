@@ -43,8 +43,15 @@ class RealtimeAudio: NSObject {
     isPaused: false,
     duration: 0,
     durationTotal: 0,
-    chunkCount: 0
+    chunkCount: 0,
+    renderedMs: 0,
+    isRendering: false
   )
+
+  /// Whether the mic capture path has delivered its first real buffer since the
+  /// tap was (re)installed — bubbles' `captureProvenLive`. Read back via
+  /// `getEchoCancellationState`. Monotonic false→true within a capture session.
+  private var captureProvenLive = false
 
   /// Mutable override for recorder state — allows dynamic toggling without
   /// disposing the engine. `nil` means use `arguments.recorderEnabled`.
@@ -318,11 +325,16 @@ class RealtimeAudio: NSObject {
       durationTotal = max(0, Int((secondsTotal * 1000).rounded()))
     }
 
+    let renderedMs = audioPlayerNode.playedMs
+    let isRendering = audioPlayerNode.isRenderingPlayback
+
     DispatchQueue.main.async { [weak self] in
       guard let self else { return }
 
       self.state.duration = duration
       self.state.durationTotal = durationTotal
+      self.state.renderedMs = renderedMs
+      self.state.isRendering = isRendering
       self.notifyState()
     }
   }
@@ -334,6 +346,8 @@ class RealtimeAudio: NSObject {
     state.chunkCount = audioPlayerNode.queue.count
     state.isPlaying = audioPlayerNode.isPlaying
     if let isPaused { state.isPaused = isPaused }
+    state.renderedMs = audioPlayerNode.playedMs
+    state.isRendering = audioPlayerNode.isRenderingPlayback
     notifyState()
   }
 
@@ -358,6 +372,47 @@ class RealtimeAudio: NSObject {
 
   func notifyRecorderVolume(_ volume: Float? = nil) {
     methodChannel.invokeMethod("recorderVolume", arguments: volume ?? -96.0)
+  }
+
+  /// Total queued milliseconds of the current stream, from the player node's
+  /// scheduled sample count (output sample rate).
+  private func totalQueuedMs() -> Int {
+    RenderClock.framesToMs(
+      sampleTime: Int64(audioPlayerNode.totalSampleTime),
+      sampleRate: playerOutputFormat.sampleRate
+    )
+  }
+
+  /// Snapshot of the completion-independent render clock — see
+  /// `ChunkAudioPlayerNode.playedMs`.
+  private func playbackClockMap() -> [String: Any] {
+    return [
+      "renderedMs": audioPlayerNode.playedMs,
+      "isRendering": audioPlayerNode.isRenderingPlayback,
+      "durationTotalMs": totalQueuedMs(),
+    ]
+  }
+
+  /// Live read-back of the AEC path. On iOS/macOS, AEC is handled by Apple's
+  /// VoiceProcessingIO — enabled only when recording with `voiceProcessing`.
+  /// `nativeEnabled` reads the real state back rather than assuming it.
+  private func echoCancellationStateMap() -> [String: Any] {
+    var nativeEnabled = false
+    var mechanism = RealtimeAudioEchoCancellationMechanism.none
+
+    #if os(iOS)
+      if isRecorderEnabled && arguments.voiceProcessing {
+        mechanism = .appleVoiceProcessingIO
+        nativeEnabled = audioEngine.inputNode.isVoiceProcessingEnabled
+      }
+    #endif
+
+    return [
+      "requested": arguments.voiceProcessing,
+      "nativeEnabled": nativeEnabled,
+      "mechanism": mechanism.rawValue,
+      "captureProvenLive": captureProvenLive,
+    ]
   }
 }
 
@@ -394,6 +449,12 @@ extension RealtimeAudio {
     case "clearQueue":
       value = ["chunk": audioPlayerNode.getCurrentChunkProps()]
       stopAudio()
+      break
+    case "getPlayerPlayedDuration":
+      value = playbackClockMap()
+      break
+    case "getEchoCancellationState":
+      value = echoCancellationStateMap()
       break
     //
     case "start":
@@ -500,6 +561,8 @@ extension RealtimeAudio {
   private func installTap() throws {
     if !isRecorderEnabled { return }
 
+    // New capture session — capture liveness is unproven until the first buffer.
+    captureProvenLive = false
     audioEngine.inputNode.removeTap(onBus: recorderPreferredBus)
 
     let input = audioEngine.inputNode
@@ -515,6 +578,9 @@ extension RealtimeAudio {
     ) { [weak self] (buffer, time) -> Void in
       guard let self else { return }
       if self.shouldBePaused { return }
+
+      // First real capture buffer proves the mic path is live (captureProvenLive).
+      if buffer.frameLength > 0 { self.captureProvenLive = true }
 
       let inputCallback: AVAudioConverterInputBlock = { inNumPackets, outStatus in
         outStatus.pointee = .haveData
@@ -648,6 +714,7 @@ extension RealtimeAudio {
       if enabled && arguments.voiceProcessing && webRtcApm == nil {
         initializeApm()
       } else if !enabled {
+        captureProvenLive = false
         webRtcApm?.release()
         webRtcApm = nil
       }
