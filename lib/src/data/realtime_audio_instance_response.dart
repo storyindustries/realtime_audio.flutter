@@ -1,4 +1,5 @@
 import 'package:freezed_annotation/freezed_annotation.dart';
+import 'package:realtime_audio/src/data/realtime_audio_playback_clock.dart';
 
 part 'realtime_audio_instance_response.freezed.dart';
 part 'realtime_audio_instance_response.g.dart';
@@ -7,6 +8,11 @@ part 'realtime_audio_instance_response.g.dart';
 abstract class RealtimeAudioInstanceResponse with _$RealtimeAudioInstanceResponse {
   const factory RealtimeAudioInstanceResponse.clearQueue({
     RealtimeAudioClearQueueChunkData? chunk,
+
+    /// The call-lifetime playback counters, folded at the barge cut. Use
+    /// `clock.renderClockMs` (minus the stream baseline) as the device-truth
+    /// audible-stop position.
+    RealtimeAudioPlaybackClock? clock,
   }) = RealtimeAudioInstanceResponseClearQueue;
 
   factory RealtimeAudioInstanceResponse.fromJson(Map<String, dynamic> json) =>

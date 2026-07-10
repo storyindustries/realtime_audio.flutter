@@ -70,41 +70,58 @@ See the example project for a complete example.
 When you drive server-paced TTS PCM through the player, you often need to know
 **how much of the current stream the device actually rendered** — for example to
 gate barge-in / talk-over on the server. Completion callbacks alone are not
-trustworthy (they can stall or die), so the plugin exposes a
-**completion-independent render clock** derived from the platform playback head
-(iOS `AVAudioPlayerNode.playerTime`, Android `AudioTrack.playbackHeadPosition`).
+trustworthy (they can stall or die), so the plugin exposes **three call-lifetime
+playback counters**:
 
 ```dart
 final clock = await audio.getPlayerPlayedDuration();
-// clock.renderedMs      — device-truth ms rendered for the current/last stream
-// clock.isRendering     — is the device actively rendering queued PCM right now
-// clock.durationTotalMs — total queued ms (rendered + pending)
+// clock.renderClockMs  — completion-INDEPENDENT device playback-head timeline
+// clock.renderedMs     — completion-DRIVEN played-out ms (iOS .dataPlayedBack)
+// clock.scheduledMs    — total ms scheduled onto the player (upper bound)
+// clock.isRendering    — is the device actively rendering right now
 ```
 
-The same values are mirrored on `stateStream` as
-`RealtimeAudioState.renderedMs` / `RealtimeAudioState.isRendering`, so the
-terminal `isPlaying: false` state already carries the device-truth `renderedMs`
-(handy for reporting `playedMs` on every playback stop, including natural drain).
+`renderClockMs` is the device-truth "how much actually played out" signal — it is
+derived from the platform playback head (iOS `AVAudioPlayerNode.playerTime`,
+Android `AudioTrack.playbackHeadPosition`), so it keeps advancing even when
+per-buffer completion callbacks stall or die.
 
-`renderedMs` is distinct from the existing `duration` field: `duration` is the
-**live** playback head (resets to `0` at stop), whereas `renderedMs` **latches**
-its final value across a reset so it stays readable after the stream ends.
+`renderClockMs` and `isRendering` are also mirrored on `stateStream` as
+`RealtimeAudioState.renderClockMs` / `RealtimeAudioState.isRendering`, and the
+folded lifetime clock is returned from `clearQueue()` on
+`RealtimeAudioInstanceResponseClearQueue.clock` (the barge cut position).
 
-### Reset semantics
+### Lifetime & reset semantics
 
-| Transition | `renderedMs` | `duration` (live head) |
+All three counters are **call-lifetime monotonic** — they are NOT reset per
+stream. The platform playback head resets to `0` on every player stop, so the
+current segment is **folded** into a base *before* each stop; the counters
+therefore survive `stop` / `clearQueue` / natural drain. A fresh engine
+(`dispose` + recreate) is the only full reset.
+
+| Transition | `renderClockMs` (lifetime) | `duration` (live per-segment head) |
 |---|---|---|
-| `queueChunk` → first render | starts at `0`, advances monotonically | advances |
-| `pause` / `resume` | **holds**, then continues | holds, then continues |
-| `clearQueue` (flush) | **latches** the pre-flush value | resets to `0` |
-| natural drain (queue empties) | **latches** the pre-drain value | resets to `0` |
-| `stop` | **latches** the pre-stop value | resets to `0` |
-| next stream's first render | resets to `0` | resets to `0` |
-| `dispose` | gone (engine destroyed) | gone |
+| `queueChunk` → first render | advances | advances from `0` |
+| `pause` / `resume` | holds, then continues | holds, then continues |
+| `clearQueue` (flush) | **folds** segment in, then holds | resets to `0` |
+| natural drain (queue empties) | **folds** segment in, then holds | resets to `0` |
+| `stop` | **folds** segment in, then holds | resets to `0` |
+| next stream's first render | continues from the folded base | resets to `0` |
+| `dispose` (fresh engine) | resets to `0` | resets to `0` |
 
-The consumer computes a per-stream `playedMs` by subtracting a baseline captured
-at stream start (which is `0` after a reset). `renderedMs` is monotonic between
-resets, so `playedMs = renderedMs - baseline`.
+The consumer captures a **baseline at stream start** (`audio_start`) and
+subtracts it, e.g. on natural drain `playedMs = renderClockMs − baseline`; on
+barge/supersede/teardown `playedMs = clamp(max(renderedΔ, renderClockΔ),
+scheduledΔ)`. Flushed buffers never count toward `renderedMs` (a generation guard
+disowns their late completions).
+
+`isRendering` is `true` while buffers are outstanding or within a 0.2 s
+post-drain hangover (speaker ring-out), and `false` while paused.
+
+**Platform notes.** iOS counts real playout via `.dataPlayedBack` completions, so
+`renderedMs` is independent of `renderClockMs` (enabling wedge-vs-rendered-out
+discrimination). Android has no per-buffer playout callback, so `renderedMs`
+mirrors the head-based `renderClockMs`.
 
 ## 🎧 Full-duplex trust (AEC read-back)
 
@@ -115,13 +132,15 @@ requested. Read the real state back before trusting full-duplex (talk-over):
 final aec = await audio.getEchoCancellationState();
 // aec.requested         — voiceProcessing was requested for this engine
 // aec.nativeEnabled      — the platform confirmed AEC is enabled (read-back)
-// aec.mechanism          — appleVoiceProcessingIO | webRtcApm | platformVoiceCommunication | none
+// aec.mechanism          — webrtcApm | platformAec | none
 // aec.captureProvenLive  — the mic path has delivered its first real buffer
 // aec.trustsFullDuplex   — requested && nativeEnabled && captureProvenLive
 ```
 
-- **iOS / macOS**: AEC is Apple's `AVAudioEngine` VoiceProcessingIO; `nativeEnabled`
-  reads back `AVAudioInputNode.isVoiceProcessingEnabled` after enabling it.
-- **Android**: AEC is the bundled WebRTC APM when available; otherwise the engine
-  relies on the platform `VOICE_COMMUNICATION` capture source, whose liveness
-  cannot be read back (`nativeEnabled` is then `false`).
+- **iOS / macOS**: AEC is Apple's `AVAudioEngine` VoiceProcessingIO (a
+  `platformAec`); `nativeEnabled` reads back `AVAudioInputNode.isVoiceProcessingEnabled`
+  after enabling it. The bundled WebRTC APM does NS+AGC only here.
+- **Android**: AEC is the bundled WebRTC APM (`webrtcApm`) when available;
+  otherwise the engine relies on the platform `VOICE_COMMUNICATION` capture
+  source (`platformAec`), whose liveness cannot be read back (`nativeEnabled` is
+  then `false`).

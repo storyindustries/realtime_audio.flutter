@@ -14,11 +14,19 @@ _$RealtimeAudioInstanceResponseClearQueueFromJson(Map json) =>
           : RealtimeAudioClearQueueChunkData.fromJson(
               Map<String, dynamic>.from(json['chunk'] as Map),
             ),
+      clock: json['clock'] == null
+          ? null
+          : RealtimeAudioPlaybackClock.fromJson(
+              Map<String, dynamic>.from(json['clock'] as Map),
+            ),
     );
 
 Map<String, dynamic> _$RealtimeAudioInstanceResponseClearQueueToJson(
   RealtimeAudioInstanceResponseClearQueue instance,
-) => <String, dynamic>{'chunk': instance.chunk?.toJson()};
+) => <String, dynamic>{
+  'chunk': instance.chunk?.toJson(),
+  'clock': instance.clock?.toJson(),
+};
 
 _RealtimeAudioClearQueueChunkData _$RealtimeAudioClearQueueChunkDataFromJson(
   Map json,

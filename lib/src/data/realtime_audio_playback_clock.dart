@@ -3,40 +3,45 @@ import 'package:freezed_annotation/freezed_annotation.dart';
 part 'realtime_audio_playback_clock.freezed.dart';
 part 'realtime_audio_playback_clock.g.dart';
 
-/// A synchronous snapshot of the player's completion-independent render clock,
-/// returned by [RealtimeAudio.getPlayerPlayedDuration].
+/// A synchronous snapshot of the player's call-lifetime playback counters,
+/// returned by [RealtimeAudio.getPlayerPlayedDuration] (and carried on the
+/// [RealtimeAudioInstanceResponseClearQueue] returned by `clearQueue`).
 ///
-/// [renderedMs] is derived from the platform playback-head clock (iOS
-/// `AVAudioPlayerNode.playerTime`, Android `AudioTrack.playbackHeadPosition`),
-/// **not** from per-buffer completion callbacks, so it stays truthful even when
-/// those callbacks stall or die.
-///
-/// Reset semantics (see the README for the full table):
-/// - Advances monotonically while the device renders queued PCM.
-/// - Holds across `pause`/`resume`.
-/// - Latches its final value across `stop`/`clearQueue`/natural drain (the
-///   playback head is reset by the platform, but the last rendered amount stays
-///   readable) so a post-drain read still reports device truth.
-/// - Resets to `0` once a new stream begins rendering.
+/// All three counters are **call-lifetime monotonic** — they are NOT reset per
+/// stream. The current playing segment is folded into a base before every player
+/// stop (the platform playback head resets to `0` on stop), so the values
+/// survive `stop`/`clearQueue`/natural drain; a fresh engine is the only reset.
+/// The consumer computes a per-stream delta by subtracting a baseline captured
+/// at stream start. See the README for the full reset table.
 @freezed
 abstract class RealtimeAudioPlaybackClock with _$RealtimeAudioPlaybackClock {
   const RealtimeAudioPlaybackClock._();
 
   const factory RealtimeAudioPlaybackClock({
-    /// Milliseconds of the current/last stream the device actually rendered.
+    /// Completion-INDEPENDENT render clock (ms): the platform playback-head
+    /// timeline (iOS `AVAudioPlayerNode.playerTime`, Android
+    /// `AudioTrack.playbackHeadPosition`), folded across stops. Keeps advancing
+    /// even when per-buffer completion callbacks stall or die — this is the
+    /// device-truth "how much actually played out" signal.
+    @Default(0) int renderClockMs,
+
+    /// Completion-DRIVEN rendered ms: accumulated only from real playout
+    /// completions (iOS `.dataPlayedBack`; flushed buffers never count). On
+    /// Android — which has no per-buffer playout callback — this mirrors
+    /// [renderClockMs].
     @Default(0) int renderedMs,
 
-    /// Whether the device is actively rendering queued PCM ahead of the head
-    /// right now (false when paused, stalled, drained, or stopped).
-    @Default(false) bool isRendering,
+    /// Total ms ever scheduled onto the player (monotonic upper bound).
+    @Default(0) int scheduledMs,
 
-    /// Total queued milliseconds of the current stream (rendered + pending).
-    @Default(0) int durationTotalMs,
+    /// Whether the device is actively rendering right now: buffers outstanding
+    /// (or within the post-drain hangover), and not paused.
+    @Default(false) bool isRendering,
   }) = _RealtimeAudioPlaybackClock;
 
   factory RealtimeAudioPlaybackClock.fromJson(Map<String, dynamic> json) =>
       _$RealtimeAudioPlaybackClockFromJson(json);
 
-  /// [renderedMs] as a [Duration].
-  Duration get rendered => Duration(milliseconds: renderedMs);
+  /// [renderClockMs] as a [Duration].
+  Duration get renderClock => Duration(milliseconds: renderClockMs);
 }

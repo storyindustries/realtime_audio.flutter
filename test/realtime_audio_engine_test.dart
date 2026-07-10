@@ -17,34 +17,36 @@ void main() {
         'duration': 0,
         'durationTotal': 4000,
         'chunkCount': 0,
-        'renderedMs': 3820,
+        'renderClockMs': 3820,
         'isRendering': false,
       });
 
-      // `duration` (live head) resets to 0 at stop, but `renderedMs` latches the
-      // device-truth amount actually rendered before the reset.
+      // `duration` (live per-segment head) resets to 0 at stop, but the
+      // call-lifetime `renderClockMs` survives the reset (folded).
       expect(state.duration, 0);
-      expect(state.renderedMs, 3820);
+      expect(state.renderClockMs, 3820);
       expect(state.isRendering, false);
     });
 
     test('RealtimeAudioState defaults the new fields when absent', () {
       final state = RealtimeAudioState.fromJson(const {'isPlaying': true});
-      expect(state.renderedMs, 0);
+      expect(state.renderClockMs, 0);
       expect(state.isRendering, false);
     });
 
-    test('RealtimeAudioPlaybackClock decodes and exposes rendered Duration', () {
+    test('RealtimeAudioPlaybackClock decodes the three lifetime counters', () {
       final clock = RealtimeAudioPlaybackClock.fromJson(const {
-        'renderedMs': 1234,
+        'renderClockMs': 3820,
+        'renderedMs': 3800,
+        'scheduledMs': 4000,
         'isRendering': true,
-        'durationTotalMs': 5000,
       });
 
-      expect(clock.renderedMs, 1234);
+      expect(clock.renderClockMs, 3820);
+      expect(clock.renderedMs, 3800);
+      expect(clock.scheduledMs, 4000);
       expect(clock.isRendering, true);
-      expect(clock.durationTotalMs, 5000);
-      expect(clock.rendered, const Duration(milliseconds: 1234));
+      expect(clock.renderClock, const Duration(milliseconds: 3820));
     });
 
     test('RealtimeAudioEchoCancellationState trust predicate follows bubbles', () {
@@ -54,26 +56,27 @@ void main() {
       final trusted = decode(const {
         'requested': true,
         'nativeEnabled': true,
-        'mechanism': 'appleVoiceProcessingIO',
+        'mechanism': 'platform_aec',
         'captureProvenLive': true,
       });
-      expect(trusted.mechanism, RealtimeAudioEchoCancellationMechanism.appleVoiceProcessingIO);
+      expect(trusted.mechanism, RealtimeAudioEchoCancellationMechanism.platformAec);
       expect(trusted.trustsFullDuplex, true);
 
-      // Requested + mechanism present, but the device never confirmed enable and
-      // no live capture buffer arrived → NOT trusted (never assume).
+      // Requested + mechanism present, but the device never confirmed enable →
+      // NOT trusted (never assume).
       final notReadBack = decode(const {
         'requested': true,
         'nativeEnabled': false,
-        'mechanism': 'webRtcApm',
+        'mechanism': 'webrtc_apm',
         'captureProvenLive': true,
       });
+      expect(notReadBack.mechanism, RealtimeAudioEchoCancellationMechanism.webrtcApm);
       expect(notReadBack.trustsFullDuplex, false);
 
       final noCapture = decode(const {
         'requested': true,
         'nativeEnabled': true,
-        'mechanism': 'webRtcApm',
+        'mechanism': 'webrtc_apm',
         'captureProvenLive': false,
       });
       expect(noCapture.trustsFullDuplex, false);
@@ -120,9 +123,10 @@ void main() {
         invoked.add(call.method);
         if (call.method == 'getPlayerPlayedDuration') {
           return <String, dynamic>{
-            'renderedMs': 3820,
+            'renderClockMs': 3820,
+            'renderedMs': 3800,
+            'scheduledMs': 4000,
             'isRendering': false,
-            'durationTotalMs': 4000,
           };
         }
         return null;
@@ -132,9 +136,42 @@ void main() {
 
       expect(invoked, contains('getPlayerPlayedDuration'));
       expect(clock, isNotNull);
-      expect(clock!.renderedMs, 3820);
+      expect(clock!.renderClockMs, 3820);
+      expect(clock.renderedMs, 3800);
+      expect(clock.scheduledMs, 4000);
       expect(clock.isRendering, false);
-      expect(clock.durationTotalMs, 4000);
+    });
+
+    test('clearQueue returns the folded lifetime clock alongside the chunk', () async {
+      messenger.setMockMethodCallHandler(engineChannel!, (call) async {
+        if (call.method == 'clearQueue') {
+          return <String, dynamic>{
+            'chunk': <String, dynamic>{
+              'id': 'chunk-1',
+              'sampleRate': 24000.0,
+              'sampleTime': 2400,
+              'sampleTimeTotal': 4800,
+              'chunkSampleTime': 1200,
+              'chunkSampleTimeTotal': 2400,
+            },
+            'clock': <String, dynamic>{
+              'renderClockMs': 1900,
+              'renderedMs': 1850,
+              'scheduledMs': 4000,
+              'isRendering': false,
+            },
+          };
+        }
+        return null;
+      });
+
+      final response = await audio.clearQueue();
+
+      expect(response, isNotNull);
+      expect(response!.chunk?.id, 'chunk-1');
+      // The barge cut position, device-truth, comes from the folded render clock.
+      expect(response.clock?.renderClockMs, 1900);
+      expect(response.clock?.scheduledMs, 4000);
     });
 
     test('getEchoCancellationState invokes the engine channel and types the result', () async {
@@ -145,7 +182,7 @@ void main() {
           return <String, dynamic>{
             'requested': true,
             'nativeEnabled': true,
-            'mechanism': 'appleVoiceProcessingIO',
+            'mechanism': 'platform_aec',
             'captureProvenLive': true,
           };
         }
@@ -158,7 +195,7 @@ void main() {
       expect(aec, isNotNull);
       expect(aec!.requested, true);
       expect(aec.nativeEnabled, true);
-      expect(aec.mechanism, RealtimeAudioEchoCancellationMechanism.appleVoiceProcessingIO);
+      expect(aec.mechanism, RealtimeAudioEchoCancellationMechanism.platformAec);
       expect(aec.captureProvenLive, true);
       expect(aec.trustsFullDuplex, true);
     });

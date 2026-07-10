@@ -1,3 +1,5 @@
+import 'package:freezed_annotation/freezed_annotation.dart';
+
 enum RealtimeAudioRecordPermission {
   undetermined,
   denied,
@@ -9,16 +11,16 @@ enum RealtimeAudioRecordPermission {
 ///
 /// - [none]: no echo cancellation is active (e.g. recorder disabled, or voice
 ///   processing failed / was not requested).
-/// - [appleVoiceProcessingIO]: Apple's `AVAudioEngine` VoiceProcessingIO unit
-///   (hardware AEC) on iOS/macOS.
-/// - [webRtcApm]: the bundled WebRTC Audio Processing Module (software AEC) on
-///   Android.
-/// - [platformVoiceCommunication]: Android is relying on the platform
-///   `VOICE_COMMUNICATION` capture source for preprocessing, but the software
-///   APM is unavailable so liveness cannot be read back.
+/// - [webrtcApm]: the bundled WebRTC Audio Processing Module (software AEC),
+///   used on Android.
+/// - [platformAec]: a platform echo canceller — Apple's `AVAudioEngine`
+///   VoiceProcessingIO on iOS/macOS, or the Android `VOICE_COMMUNICATION`
+///   capture source. On Android this path's liveness cannot be read back.
 enum RealtimeAudioEchoCancellationMechanism {
+  @JsonValue('none')
   none,
-  appleVoiceProcessingIO,
-  webRtcApm,
-  platformVoiceCommunication,
+  @JsonValue('webrtc_apm')
+  webrtcApm,
+  @JsonValue('platform_aec')
+  platformAec,
 }

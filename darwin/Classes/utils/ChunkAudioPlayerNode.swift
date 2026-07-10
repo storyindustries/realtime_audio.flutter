@@ -11,41 +11,65 @@ class ChunkAudioPlayerNode: AVAudioPlayerNode {
   private let converter: PCMStreamConverter
   private weak var listener: ChunkAudioEventListener? = nil
 
-  /// True between `play()` and `stop()` — i.e. the node is rendering or paused
-  /// (holding position), false once stopped/flushed. Gates whether the render
-  /// clock reads the live playback head or the latched value.
-  private(set) var isPlaybackActive = false
+  // MARK: - Render clock (call-lifetime; completion-independent + completion-driven)
+  //
+  // Three lifetime counters, monotonic for the node's lifetime. They are NOT
+  // reset per stream — the live segment is FOLDED into a base before every stop
+  // (AVAudioPlayerNode.playerTime resets to 0 on stop), so the values survive
+  // stop/clearQueue/drain. A fresh node (engine teardown) is the only full
+  // reset. The consumer subtracts a baseline captured at stream start.
 
-  /// Last device-truth rendered milliseconds, latched so it survives the
-  /// playback-head reset that `stop()` performs.
-  private var latchedPlayedMs = 0
+  /// Folded base of the completion-INDEPENDENT render clock (ms). The live
+  /// segment (`playerTime`) is added on top; before every stop the current
+  /// segment is folded in so the value survives the head reset.
+  private var renderClockBaseMs: Double = 0
+  /// Completion-DRIVEN rendered ms — accumulated only from `.dataPlayedBack`
+  /// completions of buffers that were NOT flushed (generation-guarded).
+  private var completionRenderedMs: Double = 0
+  /// Total ms ever scheduled onto the player (monotonic upper bound).
+  private var scheduledMsAccum: Double = 0
+  /// Bumped whenever queued buffers are dropped (stop/flush) so late completions
+  /// of flushed buffers are ignored and never counted as rendered.
+  private var generation: Int = 0
+  /// Buffers scheduled but not yet completed (or dropped).
+  private var outstandingBuffers: Int = 0
+  /// Monotonic host time (s) when playback last reached zero outstanding
+  /// buffers — drives the render hangover.
+  private var lastPlaybackEndedAt: TimeInterval?
 
-  /// Live playback-head position in ms, or nil if the node isn't currently
-  /// mapping node time (e.g. stopped). Derived from `playerTime` — the platform
-  /// render clock — so it is independent of per-buffer completion callbacks.
-  private func liveHeadMs() -> Int? {
-    guard let lastTime = lastRenderTime, let time = playerTime(forNodeTime: lastTime) else { return nil }
-    return RenderClock.framesToMs(sampleTime: time.sampleTime, sampleRate: time.sampleRate)
+  /// Post-drain hangover: keep reporting "rendering" briefly after the last
+  /// buffer drains, covering speaker ring-out / output pipeline latency.
+  private static let renderHangover: TimeInterval = 0.2
+
+  /// Live segment position in ms since the current `play()` (0 when stopped /
+  /// head reset). Completion-independent — read straight off the render timeline.
+  private func currentSegmentMs() -> Double {
+    guard let lastTime = lastRenderTime, let time = playerTime(forNodeTime: lastTime), time.sampleTime > 0 else {
+      return 0
+    }
+    return Double(time.sampleTime) / time.sampleRate * 1000.0
   }
 
-  /// Device-truth milliseconds rendered for the current/last stream. Advances
-  /// while rendering, holds while paused, and latches across stop/flush so a
-  /// post-drain read still reports what the device actually played.
-  var playedMs: Int {
-    if isPlaybackActive, let ms = liveHeadMs() {
-      latchedPlayedMs = ms
-      return ms
-    }
-    return latchedPlayedMs
+  /// Fold the current segment into the base BEFORE a stop resets the head.
+  private func foldRenderClock() {
+    renderClockBaseMs += currentSegmentMs()
   }
 
-  /// Whether the device is actively rendering queued PCM ahead of the head
-  /// (false when paused, stalled, drained, or stopped).
-  var isRenderingPlayback: Bool {
-    guard isPlaybackActive, let lastTime = lastRenderTime, let time = playerTime(forNodeTime: lastTime) else {
-      return false
-    }
-    return time.sampleTime < Int64(totalSampleTime)
+  /// Completion-INDEPENDENT lifetime render clock (ms). Survives dead per-buffer
+  /// completions (derived from the render timeline) and player stops (folded).
+  var lifetimeRenderClockMs: Int { Int((renderClockBaseMs + currentSegmentMs()).rounded()) }
+  /// Completion-DRIVEN lifetime rendered ms (`.dataPlayedBack`, flush-excluded).
+  var lifetimeRenderedMs: Int { Int(completionRenderedMs.rounded()) }
+  /// Lifetime ms scheduled onto the player (monotonic upper bound).
+  var lifetimeScheduledMs: Int { Int(scheduledMsAccum.rounded()) }
+
+  /// Whether the device is actively rendering: buffers outstanding, or within
+  /// the post-drain hangover window. Pause gating is applied by the engine
+  /// (which owns the paused state).
+  var isRenderingPlaybackRaw: Bool {
+    if outstandingBuffers > 0 { return true }
+    if let ended = lastPlaybackEndedAt { return (ProcessInfo.processInfo.systemUptime - ended) < Self.renderHangover }
+    return false
   }
 
   init(
@@ -67,11 +91,28 @@ class ChunkAudioPlayerNode: AVAudioPlayerNode {
       offset: totalSampleTime
     )
 
+    // Scheduled-ms upper bound + outstanding accounting, tagged with the current
+    // generation so a later flush can disown this buffer's completion.
+    let bufferMs = Double(entry.buffer.frameLength) / outputFormat.sampleRate * 1000.0
+    let scheduledGeneration = generation
+    scheduledMsAccum += bufferMs
+    outstandingBuffers += 1
+
     queue.append(entry)
     listener?.onChunkQueued(id)
-    scheduleBuffer(entry.buffer) { [weak self] in
+    // `.dataPlayedBack` fires when the buffer has actually been played out (not
+    // merely consumed), so completionRenderedMs tracks true playout.
+    scheduleBuffer(entry.buffer, completionCallbackType: .dataPlayedBack) { [weak self] _ in
       DispatchQueue.main.async { [weak self] in
         guard let self else { return }
+
+        // Count toward completion-driven rendered ms only if this buffer wasn't
+        // flushed (its generation still current).
+        if scheduledGeneration == self.generation {
+          self.completionRenderedMs += bufferMs
+          self.outstandingBuffers = max(0, self.outstandingBuffers - 1)
+          if self.outstandingBuffers == 0 { self.lastPlaybackEndedAt = ProcessInfo.processInfo.systemUptime }
+        }
 
         let chunkQueueCountBefore = self.queue.count
         self.queue.removeAll { $0.id == entry.id }
@@ -91,15 +132,18 @@ class ChunkAudioPlayerNode: AVAudioPlayerNode {
       listener?.onChunkQueueStarted(firstChunkId)
     }
 
-    isPlaybackActive = true
     super.play()
   }
 
   override func stop() {
-    // Latch the device-truth rendered position BEFORE super.stop() resets the
-    // node's playback head, so a post-stop / post-drain read still reports it.
-    if isPlaybackActive, let ms = liveHeadMs() { latchedPlayedMs = ms }
-    isPlaybackActive = false
+    // Fold the live segment into the base BEFORE super.stop() resets the head,
+    // so the lifetime render clock stays monotonic across the stop.
+    foldRenderClock()
+    // Disown any queued/flushed buffers so their completions never count as
+    // rendered (flushed frames must NEVER be reported as played).
+    generation += 1
+    if outstandingBuffers > 0 { lastPlaybackEndedAt = ProcessInfo.processInfo.systemUptime }
+    outstandingBuffers = 0
 
     isChunkQueueStartedNeeded = true
     super.stop()

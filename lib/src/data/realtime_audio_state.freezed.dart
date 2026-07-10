@@ -18,13 +18,15 @@ mixin _$RealtimeAudioState {
  bool get isPlaying; bool get isPaused;//
  int get duration; int get durationTotal;//
  int get chunkCount;//
-/// Device-truth milliseconds the player has actually rendered for the
-/// current stream. Unlike [duration] (the live playback head, which resets
-/// to `0` at stop), this **latches** its final value across
+/// Completion-independent, **call-lifetime** render clock (ms) — the device
+/// playback-head timeline, folded across stops (see
+/// [RealtimeAudioPlaybackClock.renderClockMs]). Unlike [duration] (the live
+/// per-segment head, which resets to `0` at stop), this survives
 /// stop/clearQueue/drain, so the terminal `isPlaying: false` state still
-/// reports how much was rendered. Resets to `0` when a new stream begins.
- int get renderedMs;/// Whether the device is actively rendering queued PCM ahead of the head
-/// (false when paused, stalled, drained, or stopped).
+/// reports the device-truth position. The consumer subtracts a baseline
+/// captured at stream start.
+ int get renderClockMs;/// Whether the device is actively rendering right now (buffers outstanding
+/// or within the post-drain hangover, and not paused).
  bool get isRendering;
 /// Create a copy of RealtimeAudioState
 /// with the given fields replaced by the non-null parameter values.
@@ -38,16 +40,16 @@ $RealtimeAudioStateCopyWith<RealtimeAudioState> get copyWith => _$RealtimeAudioS
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is RealtimeAudioState&&(identical(other.isPlaying, isPlaying) || other.isPlaying == isPlaying)&&(identical(other.isPaused, isPaused) || other.isPaused == isPaused)&&(identical(other.duration, duration) || other.duration == duration)&&(identical(other.durationTotal, durationTotal) || other.durationTotal == durationTotal)&&(identical(other.chunkCount, chunkCount) || other.chunkCount == chunkCount)&&(identical(other.renderedMs, renderedMs) || other.renderedMs == renderedMs)&&(identical(other.isRendering, isRendering) || other.isRendering == isRendering));
+  return identical(this, other) || (other.runtimeType == runtimeType&&other is RealtimeAudioState&&(identical(other.isPlaying, isPlaying) || other.isPlaying == isPlaying)&&(identical(other.isPaused, isPaused) || other.isPaused == isPaused)&&(identical(other.duration, duration) || other.duration == duration)&&(identical(other.durationTotal, durationTotal) || other.durationTotal == durationTotal)&&(identical(other.chunkCount, chunkCount) || other.chunkCount == chunkCount)&&(identical(other.renderClockMs, renderClockMs) || other.renderClockMs == renderClockMs)&&(identical(other.isRendering, isRendering) || other.isRendering == isRendering));
 }
 
 @JsonKey(includeFromJson: false, includeToJson: false)
 @override
-int get hashCode => Object.hash(runtimeType,isPlaying,isPaused,duration,durationTotal,chunkCount,renderedMs,isRendering);
+int get hashCode => Object.hash(runtimeType,isPlaying,isPaused,duration,durationTotal,chunkCount,renderClockMs,isRendering);
 
 @override
 String toString() {
-  return 'RealtimeAudioState(isPlaying: $isPlaying, isPaused: $isPaused, duration: $duration, durationTotal: $durationTotal, chunkCount: $chunkCount, renderedMs: $renderedMs, isRendering: $isRendering)';
+  return 'RealtimeAudioState(isPlaying: $isPlaying, isPaused: $isPaused, duration: $duration, durationTotal: $durationTotal, chunkCount: $chunkCount, renderClockMs: $renderClockMs, isRendering: $isRendering)';
 }
 
 
@@ -58,7 +60,7 @@ abstract mixin class $RealtimeAudioStateCopyWith<$Res>  {
   factory $RealtimeAudioStateCopyWith(RealtimeAudioState value, $Res Function(RealtimeAudioState) _then) = _$RealtimeAudioStateCopyWithImpl;
 @useResult
 $Res call({
- bool isPlaying, bool isPaused, int duration, int durationTotal, int chunkCount, int renderedMs, bool isRendering
+ bool isPlaying, bool isPaused, int duration, int durationTotal, int chunkCount, int renderClockMs, bool isRendering
 });
 
 
@@ -75,14 +77,14 @@ class _$RealtimeAudioStateCopyWithImpl<$Res>
 
 /// Create a copy of RealtimeAudioState
 /// with the given fields replaced by the non-null parameter values.
-@pragma('vm:prefer-inline') @override $Res call({Object? isPlaying = null,Object? isPaused = null,Object? duration = null,Object? durationTotal = null,Object? chunkCount = null,Object? renderedMs = null,Object? isRendering = null,}) {
+@pragma('vm:prefer-inline') @override $Res call({Object? isPlaying = null,Object? isPaused = null,Object? duration = null,Object? durationTotal = null,Object? chunkCount = null,Object? renderClockMs = null,Object? isRendering = null,}) {
   return _then(_self.copyWith(
 isPlaying: null == isPlaying ? _self.isPlaying : isPlaying // ignore: cast_nullable_to_non_nullable
 as bool,isPaused: null == isPaused ? _self.isPaused : isPaused // ignore: cast_nullable_to_non_nullable
 as bool,duration: null == duration ? _self.duration : duration // ignore: cast_nullable_to_non_nullable
 as int,durationTotal: null == durationTotal ? _self.durationTotal : durationTotal // ignore: cast_nullable_to_non_nullable
 as int,chunkCount: null == chunkCount ? _self.chunkCount : chunkCount // ignore: cast_nullable_to_non_nullable
-as int,renderedMs: null == renderedMs ? _self.renderedMs : renderedMs // ignore: cast_nullable_to_non_nullable
+as int,renderClockMs: null == renderClockMs ? _self.renderClockMs : renderClockMs // ignore: cast_nullable_to_non_nullable
 as int,isRendering: null == isRendering ? _self.isRendering : isRendering // ignore: cast_nullable_to_non_nullable
 as bool,
   ));
@@ -169,10 +171,10 @@ return $default(_that);case _:
 /// }
 /// ```
 
-@optionalTypeArgs TResult maybeWhen<TResult extends Object?>(TResult Function( bool isPlaying,  bool isPaused,  int duration,  int durationTotal,  int chunkCount,  int renderedMs,  bool isRendering)?  $default,{required TResult orElse(),}) {final _that = this;
+@optionalTypeArgs TResult maybeWhen<TResult extends Object?>(TResult Function( bool isPlaying,  bool isPaused,  int duration,  int durationTotal,  int chunkCount,  int renderClockMs,  bool isRendering)?  $default,{required TResult orElse(),}) {final _that = this;
 switch (_that) {
 case _RealtimeAudioState() when $default != null:
-return $default(_that.isPlaying,_that.isPaused,_that.duration,_that.durationTotal,_that.chunkCount,_that.renderedMs,_that.isRendering);case _:
+return $default(_that.isPlaying,_that.isPaused,_that.duration,_that.durationTotal,_that.chunkCount,_that.renderClockMs,_that.isRendering);case _:
   return orElse();
 
 }
@@ -190,10 +192,10 @@ return $default(_that.isPlaying,_that.isPaused,_that.duration,_that.durationTota
 /// }
 /// ```
 
-@optionalTypeArgs TResult when<TResult extends Object?>(TResult Function( bool isPlaying,  bool isPaused,  int duration,  int durationTotal,  int chunkCount,  int renderedMs,  bool isRendering)  $default,) {final _that = this;
+@optionalTypeArgs TResult when<TResult extends Object?>(TResult Function( bool isPlaying,  bool isPaused,  int duration,  int durationTotal,  int chunkCount,  int renderClockMs,  bool isRendering)  $default,) {final _that = this;
 switch (_that) {
 case _RealtimeAudioState():
-return $default(_that.isPlaying,_that.isPaused,_that.duration,_that.durationTotal,_that.chunkCount,_that.renderedMs,_that.isRendering);case _:
+return $default(_that.isPlaying,_that.isPaused,_that.duration,_that.durationTotal,_that.chunkCount,_that.renderClockMs,_that.isRendering);case _:
   throw StateError('Unexpected subclass');
 
 }
@@ -210,10 +212,10 @@ return $default(_that.isPlaying,_that.isPaused,_that.duration,_that.durationTota
 /// }
 /// ```
 
-@optionalTypeArgs TResult? whenOrNull<TResult extends Object?>(TResult? Function( bool isPlaying,  bool isPaused,  int duration,  int durationTotal,  int chunkCount,  int renderedMs,  bool isRendering)?  $default,) {final _that = this;
+@optionalTypeArgs TResult? whenOrNull<TResult extends Object?>(TResult? Function( bool isPlaying,  bool isPaused,  int duration,  int durationTotal,  int chunkCount,  int renderClockMs,  bool isRendering)?  $default,) {final _that = this;
 switch (_that) {
 case _RealtimeAudioState() when $default != null:
-return $default(_that.isPlaying,_that.isPaused,_that.duration,_that.durationTotal,_that.chunkCount,_that.renderedMs,_that.isRendering);case _:
+return $default(_that.isPlaying,_that.isPaused,_that.duration,_that.durationTotal,_that.chunkCount,_that.renderClockMs,_that.isRendering);case _:
   return null;
 
 }
@@ -225,7 +227,7 @@ return $default(_that.isPlaying,_that.isPaused,_that.duration,_that.durationTota
 @JsonSerializable()
 
 class _RealtimeAudioState implements RealtimeAudioState {
-  const _RealtimeAudioState({this.isPlaying = false, this.isPaused = false, this.duration = 0, this.durationTotal = 0, this.chunkCount = 0, this.renderedMs = 0, this.isRendering = false});
+  const _RealtimeAudioState({this.isPlaying = false, this.isPaused = false, this.duration = 0, this.durationTotal = 0, this.chunkCount = 0, this.renderClockMs = 0, this.isRendering = false});
   factory _RealtimeAudioState.fromJson(Map<String, dynamic> json) => _$RealtimeAudioStateFromJson(json);
 
 @override@JsonKey() final  bool isPlaying;
@@ -236,14 +238,16 @@ class _RealtimeAudioState implements RealtimeAudioState {
 //
 @override@JsonKey() final  int chunkCount;
 //
-/// Device-truth milliseconds the player has actually rendered for the
-/// current stream. Unlike [duration] (the live playback head, which resets
-/// to `0` at stop), this **latches** its final value across
+/// Completion-independent, **call-lifetime** render clock (ms) — the device
+/// playback-head timeline, folded across stops (see
+/// [RealtimeAudioPlaybackClock.renderClockMs]). Unlike [duration] (the live
+/// per-segment head, which resets to `0` at stop), this survives
 /// stop/clearQueue/drain, so the terminal `isPlaying: false` state still
-/// reports how much was rendered. Resets to `0` when a new stream begins.
-@override@JsonKey() final  int renderedMs;
-/// Whether the device is actively rendering queued PCM ahead of the head
-/// (false when paused, stalled, drained, or stopped).
+/// reports the device-truth position. The consumer subtracts a baseline
+/// captured at stream start.
+@override@JsonKey() final  int renderClockMs;
+/// Whether the device is actively rendering right now (buffers outstanding
+/// or within the post-drain hangover, and not paused).
 @override@JsonKey() final  bool isRendering;
 
 /// Create a copy of RealtimeAudioState
@@ -259,16 +263,16 @@ Map<String, dynamic> toJson() {
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is _RealtimeAudioState&&(identical(other.isPlaying, isPlaying) || other.isPlaying == isPlaying)&&(identical(other.isPaused, isPaused) || other.isPaused == isPaused)&&(identical(other.duration, duration) || other.duration == duration)&&(identical(other.durationTotal, durationTotal) || other.durationTotal == durationTotal)&&(identical(other.chunkCount, chunkCount) || other.chunkCount == chunkCount)&&(identical(other.renderedMs, renderedMs) || other.renderedMs == renderedMs)&&(identical(other.isRendering, isRendering) || other.isRendering == isRendering));
+  return identical(this, other) || (other.runtimeType == runtimeType&&other is _RealtimeAudioState&&(identical(other.isPlaying, isPlaying) || other.isPlaying == isPlaying)&&(identical(other.isPaused, isPaused) || other.isPaused == isPaused)&&(identical(other.duration, duration) || other.duration == duration)&&(identical(other.durationTotal, durationTotal) || other.durationTotal == durationTotal)&&(identical(other.chunkCount, chunkCount) || other.chunkCount == chunkCount)&&(identical(other.renderClockMs, renderClockMs) || other.renderClockMs == renderClockMs)&&(identical(other.isRendering, isRendering) || other.isRendering == isRendering));
 }
 
 @JsonKey(includeFromJson: false, includeToJson: false)
 @override
-int get hashCode => Object.hash(runtimeType,isPlaying,isPaused,duration,durationTotal,chunkCount,renderedMs,isRendering);
+int get hashCode => Object.hash(runtimeType,isPlaying,isPaused,duration,durationTotal,chunkCount,renderClockMs,isRendering);
 
 @override
 String toString() {
-  return 'RealtimeAudioState(isPlaying: $isPlaying, isPaused: $isPaused, duration: $duration, durationTotal: $durationTotal, chunkCount: $chunkCount, renderedMs: $renderedMs, isRendering: $isRendering)';
+  return 'RealtimeAudioState(isPlaying: $isPlaying, isPaused: $isPaused, duration: $duration, durationTotal: $durationTotal, chunkCount: $chunkCount, renderClockMs: $renderClockMs, isRendering: $isRendering)';
 }
 
 
@@ -279,7 +283,7 @@ abstract mixin class _$RealtimeAudioStateCopyWith<$Res> implements $RealtimeAudi
   factory _$RealtimeAudioStateCopyWith(_RealtimeAudioState value, $Res Function(_RealtimeAudioState) _then) = __$RealtimeAudioStateCopyWithImpl;
 @override @useResult
 $Res call({
- bool isPlaying, bool isPaused, int duration, int durationTotal, int chunkCount, int renderedMs, bool isRendering
+ bool isPlaying, bool isPaused, int duration, int durationTotal, int chunkCount, int renderClockMs, bool isRendering
 });
 
 
@@ -296,14 +300,14 @@ class __$RealtimeAudioStateCopyWithImpl<$Res>
 
 /// Create a copy of RealtimeAudioState
 /// with the given fields replaced by the non-null parameter values.
-@override @pragma('vm:prefer-inline') $Res call({Object? isPlaying = null,Object? isPaused = null,Object? duration = null,Object? durationTotal = null,Object? chunkCount = null,Object? renderedMs = null,Object? isRendering = null,}) {
+@override @pragma('vm:prefer-inline') $Res call({Object? isPlaying = null,Object? isPaused = null,Object? duration = null,Object? durationTotal = null,Object? chunkCount = null,Object? renderClockMs = null,Object? isRendering = null,}) {
   return _then(_RealtimeAudioState(
 isPlaying: null == isPlaying ? _self.isPlaying : isPlaying // ignore: cast_nullable_to_non_nullable
 as bool,isPaused: null == isPaused ? _self.isPaused : isPaused // ignore: cast_nullable_to_non_nullable
 as bool,duration: null == duration ? _self.duration : duration // ignore: cast_nullable_to_non_nullable
 as int,durationTotal: null == durationTotal ? _self.durationTotal : durationTotal // ignore: cast_nullable_to_non_nullable
 as int,chunkCount: null == chunkCount ? _self.chunkCount : chunkCount // ignore: cast_nullable_to_non_nullable
-as int,renderedMs: null == renderedMs ? _self.renderedMs : renderedMs // ignore: cast_nullable_to_non_nullable
+as int,renderClockMs: null == renderClockMs ? _self.renderClockMs : renderClockMs // ignore: cast_nullable_to_non_nullable
 as int,isRendering: null == isRendering ? _self.isRendering : isRendering // ignore: cast_nullable_to_non_nullable
 as bool,
   ));

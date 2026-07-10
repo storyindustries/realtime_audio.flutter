@@ -1,35 +1,34 @@
 package dev.volskaya.realtime_audio
 
+import kotlin.math.roundToInt
 import kotlin.test.Test
 import kotlin.test.assertEquals
-import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
 /**
- * Unit tests for the pure render-clock logic backing `getPlayerPlayedDuration`
- * and the player state's `renderedMs` / `isRendering`. The AudioTrack-bound
- * pieces are covered indirectly; the math + latch/reset semantics are factored
- * into [RenderClock] so they are testable without the Android framework.
+ * Unit tests for the pure render-clock math backing `getPlayerPlayedDuration`
+ * and the player state's `renderClockMs` / `isRendering`. The AudioTrack-bound
+ * fold/hangover pieces live in [dev.volskaya.realtime_audio.utils.ChunkAudioTrack];
+ * the frame/ms math + the fold arithmetic are factored into [RenderClock] so they
+ * are testable without the Android framework.
  */
 internal class RealtimeAudioPluginTest {
   @Test
   fun framesToMs_convertsAtSampleRate() {
     // 24000 frames @ 24 kHz == 1000 ms.
-    assertEquals(1000, RenderClock.framesToMs(24000L, 24000))
+    assertEquals(1000.0, RenderClock.framesToMs(24000L, 24000))
     // 12000 frames @ 24 kHz == 500 ms.
-    assertEquals(500, RenderClock.framesToMs(12000L, 24000))
-    // 24 frames @ 24 kHz == 1 ms exactly.
-    assertEquals(1, RenderClock.framesToMs(24L, 24000))
-    // 36 frames @ 24 kHz == 1.5 ms, rounds to nearest (2).
-    assertEquals(2, RenderClock.framesToMs(36L, 24000))
+    assertEquals(500.0, RenderClock.framesToMs(12000L, 24000))
+    // Double precision (no per-segment rounding): 36 frames @ 24 kHz == 1.5 ms.
+    assertEquals(1.5, RenderClock.framesToMs(36L, 24000))
   }
 
   @Test
   fun framesToMs_guardsDegenerateInputs() {
-    assertEquals(0, RenderClock.framesToMs(0L, 24000))
-    assertEquals(0, RenderClock.framesToMs(-5L, 24000))
-    assertEquals(0, RenderClock.framesToMs(24000L, 0))
-    assertEquals(0, RenderClock.framesToMs(24000L, -1))
+    assertEquals(0.0, RenderClock.framesToMs(0L, 24000))
+    assertEquals(0.0, RenderClock.framesToMs(-5L, 24000))
+    assertEquals(0.0, RenderClock.framesToMs(24000L, 0))
+    assertEquals(0.0, RenderClock.framesToMs(24000L, -1))
   }
 
   @Test
@@ -58,47 +57,32 @@ internal class RealtimeAudioPluginTest {
 
     // Without the unsigned reinterpretation the negative raw head would clamp to
     // 0 — a huge backwards jump. This is the bug renderedFrames() prevents.
-    assertEquals(0, RenderClock.framesToMs(afterRaw.toLong(), 24000))
+    assertEquals(0.0, RenderClock.framesToMs(afterRaw.toLong(), 24000))
   }
 
   @Test
-  fun resolvePlayedMs_liveHeadWinsAndLatchesWhileActive() {
-    val r = RenderClock.resolvePlayedMs(isActive = true, liveMs = 820, latchedMs = 300)
-    assertEquals(820, r.renderedMs)
-    assertEquals(820, r.latchedMs) // latch tracks the live head during a stream
-  }
+  fun fold_accumulatesSegmentsIntoMonotonicLifetimeClock() {
+    // Mirror ChunkAudioTrack's fold: base += currentSegment before each stop, and
+    // the lifetime clock = base + currentSegment. Two rendered segments (1000 ms
+    // then 500 ms) fold to a monotonic 1500 ms — the per-segment head reset to 0
+    // between them must NOT lose the earlier segment.
+    var baseMs = 0.0
 
-  @Test
-  fun resolvePlayedMs_holdsLatchWhenStopped() {
-    // After stop/flush the platform head resets to 0, but the latched device-truth
-    // value is held so a post-drain read still reports what was rendered.
-    val r = RenderClock.resolvePlayedMs(isActive = false, liveMs = 0, latchedMs = 3820)
-    assertEquals(3820, r.renderedMs)
-    assertEquals(3820, r.latchedMs)
-  }
+    // Segment A: head reaches 24000 frames (1000 ms), then stop folds it in.
+    val segmentAMs = RenderClock.framesToMs(RenderClock.renderedFrames(24000), 24000)
+    val lifetimeDuringA = (baseMs + segmentAMs).roundToInt()
+    baseMs += segmentAMs // fold on stop
+    val lifetimeAfterAStop = (baseMs + 0.0).roundToInt() // head reset to 0 post-stop
 
-  @Test
-  fun resolvePlayedMs_holdsLatchWhenLiveReadUnavailable() {
-    val r = RenderClock.resolvePlayedMs(isActive = true, liveMs = null, latchedMs = 1500)
-    assertEquals(1500, r.renderedMs)
-    assertEquals(1500, r.latchedMs)
-  }
+    // Segment B: fresh head from 0 reaches 12000 frames (500 ms), then folds.
+    val segmentBMs = RenderClock.framesToMs(RenderClock.renderedFrames(12000), 24000)
+    val lifetimeDuringB = (baseMs + segmentBMs).roundToInt()
+    baseMs += segmentBMs // fold on stop
 
-  @Test
-  fun resolvePlayedMs_freshStreamReadsFromZeroNotPreviousLatch() {
-    // New stream: active again, live head back near 0 → shadows the previous
-    // stream's latched value (no leakage between streams).
-    val r = RenderClock.resolvePlayedMs(isActive = true, liveMs = 40, latchedMs = 3820)
-    assertEquals(40, r.renderedMs)
-    assertEquals(40, r.latchedMs)
-  }
-
-  @Test
-  fun isRenderingPredicate_matchesActiveWithHeadBehindTotal() {
-    // Mirrors ChunkAudioTrack.isRenderingPlayback: active AND head < total.
-    fun isRendering(active: Boolean, head: Long, total: Long) = active && head < total
-    assertTrue(isRendering(active = true, head = 1000, total = 4000))
-    assertFalse(isRendering(active = true, head = 4000, total = 4000)) // drained
-    assertFalse(isRendering(active = false, head = 1000, total = 4000)) // stopped/paused
+    assertEquals(1000, lifetimeDuringA)
+    assertEquals(1000, lifetimeAfterAStop) // survives the head reset
+    assertEquals(1500, lifetimeDuringB)
+    assertEquals(1500, baseMs.roundToInt())
+    assertTrue(lifetimeDuringB > lifetimeAfterAStop, "lifetime clock must be monotonic across the fold")
   }
 }

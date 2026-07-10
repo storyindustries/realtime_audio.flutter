@@ -1,15 +1,26 @@
 ## 0.0.13
 
-* Add a completion-independent player **render clock**: `getPlayerPlayedDuration()`
-  returns device-truth `renderedMs` / `isRendering` / `durationTotalMs`, derived
-  from the platform playback head (iOS `AVAudioPlayerNode.playerTime`, Android
-  `AudioTrack.playbackHeadPosition`) rather than per-buffer completion callbacks.
-  `renderedMs` latches across stop/clearQueue/drain so device-truth `playedMs`
-  stays readable after a stream ends. Also mirrored on the state stream as
-  `RealtimeAudioState.renderedMs` / `isRendering`.
+* Add a player **render clock** with three call-lifetime counters:
+  `getPlayerPlayedDuration()` returns `{ renderClockMs, renderedMs, scheduledMs,
+  isRendering }`. `renderClockMs` is completion-INDEPENDENT (the platform
+  playback-head timeline — iOS `AVAudioPlayerNode.playerTime`, Android
+  `AudioTrack.playbackHeadPosition`), so it stays truthful when per-buffer
+  completions stall/die. All counters are call-lifetime monotonic: the live
+  segment is **folded** into a base before every player stop, so they survive
+  stop/clearQueue/drain (a fresh engine is the only reset). Mirrored on the state
+  stream as `RealtimeAudioState.renderClockMs` / `isRendering`, and the folded
+  clock is returned from `clearQueue()` on
+  `RealtimeAudioInstanceResponseClearQueue.clock`.
+* iOS now schedules playback buffers with `.dataPlayedBack` completion so
+  `renderedMs` reflects true playout (flushed buffers are disowned via a
+  generation guard and never counted). Android has no per-buffer playout
+  callback, so `renderedMs` mirrors the head-based `renderClockMs`.
+* `isRendering` includes a 0.2 s post-drain hangover (speaker ring-out) and is
+  `false` while paused.
 * Add **AEC live read-back**: `getEchoCancellationState()` returns
-  `{ requested, nativeEnabled, mechanism, captureProvenLive, trustsFullDuplex }`
-  so consumers can decide whether full-duplex can be trusted (never assumed).
+  `{ requested, nativeEnabled, mechanism (webrtcApm|platformAec|none),
+  captureProvenLive, trustsFullDuplex }` so consumers can decide whether
+  full-duplex can be trusted (never assumed).
 * Wire a JUnit 5 engine so the Android unit tests run under `useJUnitPlatform()`.
 
 ## 0.0.12
