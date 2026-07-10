@@ -5,7 +5,9 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:realtime_audio/src/data/other.dart';
 import 'package:realtime_audio/src/data/realtime_audio_arguments.dart';
+import 'package:realtime_audio/src/data/realtime_audio_echo_cancellation_state.dart';
 import 'package:realtime_audio/src/data/realtime_audio_instance_response.dart';
+import 'package:realtime_audio/src/data/realtime_audio_playback_clock.dart';
 import 'package:realtime_audio/src/data/realtime_audio_queue_entry.dart';
 import 'package:realtime_audio/src/data/realtime_audio_response.dart';
 import 'package:realtime_audio/src/data/realtime_audio_state.dart';
@@ -300,6 +302,24 @@ class RealtimeAudio {
   Future<void> stop() async => _withInitAndLock(() async => _channel?.invokeMethod('stop'));
   Future<RealtimeAudioInstanceResponseClearQueue?> clearQueue() => _withInitAndLock(
       () async => _channel?.invokeMethodData('clearQueue', RealtimeAudioInstanceResponseClearQueue.fromJson));
+
+  /// Synchronously read the player's completion-independent render clock.
+  ///
+  /// Returns a device-truth measure of how much of the current playback stream
+  /// has actually been rendered by the hardware, derived from the platform
+  /// playback-head clock rather than per-buffer completion callbacks. See
+  /// [RealtimeAudioPlaybackClock] for the reset semantics. Also mirrored on the
+  /// [stateStream] as [RealtimeAudioState.renderedMs] / [RealtimeAudioState.isRendering].
+  Future<RealtimeAudioPlaybackClock?> getPlayerPlayedDuration() => _withInitAndLock(
+      () async => _channel?.invokeMethodData('getPlayerPlayedDuration', RealtimeAudioPlaybackClock.fromJson));
+
+  /// Read back whether echo cancellation is actually active for the current
+  /// capture path (never assumed), plus whether mic capture has proven live.
+  ///
+  /// Use [RealtimeAudioEchoCancellationState.trustsFullDuplex] to decide whether
+  /// full-duplex (talk-over) can be trusted.
+  Future<RealtimeAudioEchoCancellationState?> getEchoCancellationState() => _withInitAndLock(
+      () async => _channel?.invokeMethodData('getEchoCancellationState', RealtimeAudioEchoCancellationState.fromJson));
 
   /// Dynamically toggle the recorder (and voice processing / AEC) without
   /// disposing the engine. The native side reconfigures the audio session

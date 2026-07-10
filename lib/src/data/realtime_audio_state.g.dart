@@ -13,6 +13,8 @@ _RealtimeAudioState _$RealtimeAudioStateFromJson(Map json) =>
       duration: (json['duration'] as num?)?.toInt() ?? 0,
       durationTotal: (json['durationTotal'] as num?)?.toInt() ?? 0,
       chunkCount: (json['chunkCount'] as num?)?.toInt() ?? 0,
+      renderedMs: (json['renderedMs'] as num?)?.toInt() ?? 0,
+      isRendering: json['isRendering'] as bool? ?? false,
     );
 
 Map<String, dynamic> _$RealtimeAudioStateToJson(_RealtimeAudioState instance) =>
@@ -22,4 +24,6 @@ Map<String, dynamic> _$RealtimeAudioStateToJson(_RealtimeAudioState instance) =>
       'duration': instance.duration,
       'durationTotal': instance.durationTotal,
       'chunkCount': instance.chunkCount,
+      'renderedMs': instance.renderedMs,
+      'isRendering': instance.isRendering,
     };
