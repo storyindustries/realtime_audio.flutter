@@ -45,7 +45,7 @@ class RealtimeAudio: NSObject {
     duration: 0,
     durationTotal: 0,
     chunkCount: 0,
-    renderedMs: 0,
+    renderClockMs: 0,
     isRendering: false
   )
 
@@ -327,15 +327,15 @@ class RealtimeAudio: NSObject {
       durationTotal = max(0, Int((secondsTotal * 1000).rounded()))
     }
 
-    let renderedMs = audioPlayerNode.playedMs
-    let isRendering = audioPlayerNode.isRenderingPlayback
+    let renderClockMs = audioPlayerNode.lifetimeRenderClockMs
+    let isRendering = effectiveIsRendering()
 
     DispatchQueue.main.async { [weak self] in
       guard let self else { return }
 
       self.state.duration = duration
       self.state.durationTotal = durationTotal
-      self.state.renderedMs = renderedMs
+      self.state.renderClockMs = renderClockMs
       self.state.isRendering = isRendering
       self.notifyState()
     }
@@ -348,8 +348,8 @@ class RealtimeAudio: NSObject {
     state.chunkCount = audioPlayerNode.queue.count
     state.isPlaying = audioPlayerNode.isPlaying
     if let isPaused { state.isPaused = isPaused }
-    state.renderedMs = audioPlayerNode.playedMs
-    state.isRendering = audioPlayerNode.isRenderingPlayback
+    state.renderClockMs = audioPlayerNode.lifetimeRenderClockMs
+    state.isRendering = effectiveIsRendering()
     notifyState()
   }
 
@@ -376,35 +376,34 @@ class RealtimeAudio: NSObject {
     methodChannel.invokeMethod("recorderVolume", arguments: volume ?? -96.0)
   }
 
-  /// Total queued milliseconds of the current stream, from the player node's
-  /// scheduled sample count (output sample rate).
-  private func totalQueuedMs() -> Int {
-    RenderClock.framesToMs(
-      sampleTime: Int64(audioPlayerNode.totalSampleTime),
-      sampleRate: playerOutputFormat.sampleRate
-    )
+  /// Effective render state: the raw node signal (outstanding buffers or
+  /// hangover) gated by the engine's paused state (a paused engine is silent).
+  private func effectiveIsRendering() -> Bool {
+    !state.isPaused && audioPlayerNode.isRenderingPlaybackRaw
   }
 
-  /// Snapshot of the completion-independent render clock — see
-  /// `ChunkAudioPlayerNode.playedMs`.
+  /// Snapshot of the three call-lifetime playback counters + render state — see
+  /// `ChunkAudioPlayerNode`.
   private func playbackClockMap() -> [String: Any] {
     return [
-      "renderedMs": audioPlayerNode.playedMs,
-      "isRendering": audioPlayerNode.isRenderingPlayback,
-      "durationTotalMs": totalQueuedMs(),
+      "renderClockMs": audioPlayerNode.lifetimeRenderClockMs,
+      "renderedMs": audioPlayerNode.lifetimeRenderedMs,
+      "scheduledMs": audioPlayerNode.lifetimeScheduledMs,
+      "isRendering": effectiveIsRendering(),
     ]
   }
 
-  /// Live read-back of the AEC path. On iOS/macOS, AEC is handled by Apple's
-  /// VoiceProcessingIO — enabled only when recording with `voiceProcessing`.
-  /// `nativeEnabled` reads the real state back rather than assuming it.
+  /// Live read-back of the AEC path. On iOS/macOS, AEC is Apple's
+  /// VoiceProcessingIO (a platform AEC) — enabled only when recording with
+  /// `voiceProcessing`; the WebRTC APM does NS+AGC only here. `nativeEnabled`
+  /// reads the real state back (`isVoiceProcessingEnabled`) rather than assuming.
   private func echoCancellationStateMap() -> [String: Any] {
     var nativeEnabled = false
     var mechanism = RealtimeAudioEchoCancellationMechanism.none
 
     #if os(iOS)
       if isRecorderEnabled && arguments.voiceProcessing {
-        mechanism = .appleVoiceProcessingIO
+        mechanism = .platformAec
         nativeEnabled = audioEngine.inputNode.isVoiceProcessingEnabled
       }
     #endif
@@ -449,8 +448,12 @@ extension RealtimeAudio {
       try queueAudio(id, [UInt8](data.data))
       break
     case "clearQueue":
-      value = ["chunk": audioPlayerNode.getCurrentChunkProps()]
+      // Read the chunk cut position BEFORE stopping; stopAudio() then folds the
+      // render clock, so the returned `clock` carries the folded lifetime values
+      // (device truth up to the barge cut).
+      let chunk = audioPlayerNode.getCurrentChunkProps()
       stopAudio()
+      value = ["chunk": chunk as Any, "clock": playbackClockMap()]
       break
     case "getPlayerPlayedDuration":
       value = playbackClockMap()

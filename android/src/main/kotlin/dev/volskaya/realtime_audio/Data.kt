@@ -15,10 +15,10 @@ data class RealtimeAudioState(
 
   var chunkCount: Int,
 
-  // Device-truth ms rendered for the current stream. Latches across
-  // stop/clearQueue/drain (see ChunkAudioTrack.playedMs).
-  var renderedMs: Int = 0,
-  // Whether the device is actively rendering queued PCM ahead of the head.
+  // Completion-independent, call-lifetime render clock (ms). Folds across
+  // stop/clearQueue/drain (see ChunkAudioTrack.lifetimeRenderClockMs).
+  var renderClockMs: Int = 0,
+  // Whether the device is actively rendering (head behind scheduled or hangover).
   var isRendering: Boolean = false
 ) {
   fun toMap(): Map<String, Any> {
@@ -28,7 +28,7 @@ data class RealtimeAudioState(
       "duration" to duration,
       "durationTotal" to durationTotal,
       "chunkCount" to chunkCount,
-      "renderedMs" to renderedMs,
+      "renderClockMs" to renderClockMs,
       "isRendering" to isRendering
     )
   }

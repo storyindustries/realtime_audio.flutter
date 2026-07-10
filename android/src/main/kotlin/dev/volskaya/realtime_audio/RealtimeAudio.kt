@@ -196,8 +196,11 @@ class RealtimeAudio(
       }
 
       "clearQueue" -> {
-        value = mapOf("chunk" to audioTrack.getCurrentChunkProps())
+        // Read the chunk cut position BEFORE stopping; stopAudio() then folds the
+        // render clock, so the returned `clock` carries the folded lifetime values.
+        val chunk = audioTrack.getCurrentChunkProps()
         stopAudio()
+        value = mapOf("chunk" to chunk, "clock" to playbackClockMap())
       }
 
       "getPlayerPlayedDuration" -> value = playbackClockMap()
@@ -248,8 +251,8 @@ class RealtimeAudio(
 
     state.duration = (seconds * 1000).roundToInt()
     state.durationTotal = (secondsTotal * 1000).roundToInt()
-    state.renderedMs = audioTrack.playedMs
-    state.isRendering = audioTrack.isRenderingPlayback
+    state.renderClockMs = audioTrack.lifetimeRenderClockMs
+    state.isRendering = effectiveIsRendering()
 
     notifyState()
   }
@@ -261,11 +264,16 @@ class RealtimeAudio(
     state.isPaused = audioTrack.playState == AudioTrack.PLAYSTATE_PAUSED
     state.isPlaying =
       audioTrack.playState == AudioTrack.PLAYSTATE_PAUSED || audioTrack.playState == AudioTrack.PLAYSTATE_PLAYING
-    state.renderedMs = audioTrack.playedMs
-    state.isRendering = audioTrack.isRenderingPlayback
+    state.renderClockMs = audioTrack.lifetimeRenderClockMs
+    state.isRendering = effectiveIsRendering()
 
     notifyState()
   }
+
+  /// Effective render state: the raw track signal (head behind scheduled or
+  /// hangover) gated by the paused state (a paused track is silent).
+  private fun effectiveIsRendering(): Boolean =
+    audioTrack.playState != AudioTrack.PLAYSTATE_PAUSED && audioTrack.isRenderingPlaybackRaw
 
   private fun notifyPlayerVolume() {
     if (isDisposed) return
@@ -285,23 +293,24 @@ class RealtimeAudio(
     methodChannel.invokeMethod("recorderVolume", volume ?: -96.0)
   }
 
-  /// Snapshot of the completion-independent render clock — see
-  /// [ChunkAudioTrack.playedMs].
+  /// Snapshot of the three call-lifetime playback counters + render state — see
+  /// [ChunkAudioTrack].
   private fun playbackClockMap(): Map<String, Any> = mapOf(
-    "renderedMs" to audioTrack.playedMs,
-    "isRendering" to audioTrack.isRenderingPlayback,
-    "durationTotalMs" to RenderClock.framesToMs(audioTrack.totalSampleTime.toLong(), audioTrack.sampleRate),
+    "renderClockMs" to audioTrack.lifetimeRenderClockMs,
+    "renderedMs" to audioTrack.lifetimeRenderedMs,
+    "scheduledMs" to audioTrack.lifetimeScheduledMs,
+    "isRendering" to effectiveIsRendering(),
   )
 
   /// Live read-back of the AEC path. On Android, AEC is the bundled WebRTC APM
   /// (software) when available; otherwise the engine relies on the platform
-  /// VOICE_COMMUNICATION capture source, whose liveness cannot be read back.
-  /// `nativeEnabled` reflects the APM path rather than assuming it.
+  /// VOICE_COMMUNICATION capture source (reported as `platform_aec`), whose
+  /// liveness cannot be read back. `nativeEnabled` reflects the APM path only.
   private fun echoCancellationStateMap(): Map<String, Any> {
     val apmLive = webRtcApm?.isAvailable == true
     val mechanism = when {
-      apmLive -> "webRtcApm"
-      isRecorderEnabled && arguments.voiceProcessing -> "platformVoiceCommunication"
+      apmLive -> "webrtc_apm"
+      isRecorderEnabled && arguments.voiceProcessing -> "platform_aec"
       else -> "none"
     }
 

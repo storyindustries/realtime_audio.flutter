@@ -9,6 +9,7 @@ import dev.volskaya.realtime_audio.QueuedChunk
 import dev.volskaya.realtime_audio.RenderClock
 import dev.volskaya.realtime_audio.getBitRatio
 import java.lang.ref.WeakReference
+import kotlin.math.roundToInt
 
 class ChunkAudioTrack(
   attributes: AudioAttributes,
@@ -37,35 +38,60 @@ class ChunkAudioTrack(
   val dataPlaybackHeadPosition: Int get() = playbackHeadPosition * bitRatio
   val dataSampleRate: Int get() = sampleRate * bitRatio
 
-  /// True between play() and stop() — the track is rendering or paused (holding
-  /// position), false once stopped/flushed. Gates whether the render clock reads
-  /// the live playback head or the latched value.
+  // --- Render clock (call-lifetime; folded across stops) ------------------
+  //
+  // Monotonic for the track's lifetime — NOT reset per stream. The live segment
+  // is folded into a base before every stop (playbackHeadPosition resets to 0 on
+  // flush()/stop()), so the values survive stop/clearQueue/drain. A fresh track
+  // (engine teardown) is the only full reset. Consumer subtracts a baseline.
+  //
+  // Note: Android has no per-buffer PLAYED-OUT callback (the write loop reports
+  // buffer-fill, ahead of the head), so the completion-driven counter mirrors the
+  // head-based render clock — the head is the only playout truth on this platform.
+
+  /// True while a segment is playing/paused (head meaningful), false once stopped
+  /// — [playbackHeadPosition] holds its last value until flush(), so this flag
+  /// (not the raw head) tells the clock when the segment has ended.
   var isPlaybackActive = false
     private set
 
-  /// Last device-truth rendered milliseconds, latched so it survives the
-  /// playback-head reset that stop()/flush() performs.
-  private var latchedPlayedMs = 0
+  private var renderClockBaseMs = 0.0
+  private var scheduledMsAccum = 0.0
+  private var lastPlaybackEndedAtNs: Long? = null
 
   /// Wrap-safe playback-head position in frames (see [RenderClock.renderedFrames]).
   val renderedFramesNow: Long get() = RenderClock.renderedFrames(playbackHeadPosition)
 
-  /// Device-truth milliseconds rendered for the current/last stream. Advances
-  /// while rendering, holds while paused, and latches across stop/flush so a
-  /// post-drain read still reports what the device actually played. Derived from
-  /// the playback head, NOT from per-chunk completion callbacks.
-  val playedMs: Int
-    get() {
-      val live = if (isPlaybackActive) RenderClock.framesToMs(renderedFramesNow, sampleRate) else null
-      val resolution = RenderClock.resolvePlayedMs(isPlaybackActive, live, latchedPlayedMs)
-      latchedPlayedMs = resolution.latchedMs
-      return resolution.renderedMs
-    }
+  /// Live segment position in ms since the current play() (0 once stopped, so the
+  /// pre-flush head value is not double-counted after a fold).
+  private fun currentSegmentMs(): Double =
+    if (isPlaybackActive) RenderClock.framesToMs(renderedFramesNow, sampleRate) else 0.0
 
-  /// Whether the device is actively rendering queued PCM ahead of the head
-  /// (false when paused, stalled, drained, or stopped).
-  val isRenderingPlayback: Boolean
-    get() = isPlaybackActive && renderedFramesNow < totalSampleTime.toLong()
+  /// Fold the current segment into the base BEFORE a stop resets the head.
+  private fun foldRenderClock() {
+    renderClockBaseMs += currentSegmentMs()
+  }
+
+  /// Completion-independent, call-lifetime render clock (ms). Derived from the
+  /// playback head; folds across stops.
+  val lifetimeRenderClockMs: Int get() = (renderClockBaseMs + currentSegmentMs()).roundToInt()
+
+  /// Completion-driven lifetime rendered ms. Android has no playout callback, so
+  /// this mirrors the head-based render clock (kept <= the head, never ahead).
+  val lifetimeRenderedMs: Int get() = lifetimeRenderClockMs
+
+  /// Lifetime ms scheduled onto the track (monotonic upper bound).
+  val lifetimeScheduledMs: Int get() = scheduledMsAccum.roundToInt()
+
+  /// Whether the device is actively rendering: the head hasn't caught up to the
+  /// scheduled total, or we're within the post-drain hangover window. Pause
+  /// gating is applied by the engine (which owns the paused state).
+  val isRenderingPlaybackRaw: Boolean
+    get() {
+      if (isPlaybackActive && lifetimeRenderClockMs < lifetimeScheduledMs) return true
+      val ended = lastPlaybackEndedAtNs ?: return false
+      return (System.nanoTime() - ended) < RENDER_HANGOVER_NS
+    }
 
   fun queue(id: String, data: ByteArray) {
     if (data.isEmpty()) return
@@ -75,6 +101,9 @@ class ChunkAudioTrack(
       data = data,
       offset = totalDataSize,
     )
+
+    // Scheduled-ms upper bound: bytes -> frames -> ms at the output rate.
+    scheduledMsAccum += RenderClock.framesToMs((data.size / bitRatio).toLong(), sampleRate)
 
     queue.add(queuedChunkEntry)
     eventListener.get()?.onChunkQueued(id)
@@ -141,11 +170,10 @@ class ChunkAudioTrack(
   }
 
   override fun stop() {
-    // Latch the device-truth rendered position BEFORE super.stop()/flush() reset
-    // the playback head, so a post-stop / post-drain read still reports it.
-    if (isPlaybackActive) {
-      latchedPlayedMs = RenderClock.framesToMs(renderedFramesNow, sampleRate)
-    }
+    // Fold the live segment into the base BEFORE super.stop()/flush() reset the
+    // playback head, so the lifetime render clock stays monotonic across the stop.
+    foldRenderClock()
+    if (isPlaybackActive) lastPlaybackEndedAtNs = System.nanoTime()
     isPlaybackActive = false
 
     thread?.interrupt()
@@ -156,6 +184,12 @@ class ChunkAudioTrack(
     while (queue.isNotEmpty()) {
       queue.removeAt(0).let { eventListener.get()?.onChunkPlayed(it.id) }
     }
+  }
+
+  private companion object {
+    /// Post-drain hangover: keep reporting "rendering" briefly after the last
+    /// buffer drains, covering speaker ring-out / output pipeline latency.
+    private const val RENDER_HANGOVER_NS = 200_000_000L
   }
 
   fun getCurrentChunkProps(): Map<String, Any>? {

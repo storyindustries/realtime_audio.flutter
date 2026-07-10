@@ -33,9 +33,6 @@ Map<String, dynamic> _$RealtimeAudioEchoCancellationStateToJson(
 
 const _$RealtimeAudioEchoCancellationMechanismEnumMap = {
   RealtimeAudioEchoCancellationMechanism.none: 'none',
-  RealtimeAudioEchoCancellationMechanism.appleVoiceProcessingIO:
-      'appleVoiceProcessingIO',
-  RealtimeAudioEchoCancellationMechanism.webRtcApm: 'webRtcApm',
-  RealtimeAudioEchoCancellationMechanism.platformVoiceCommunication:
-      'platformVoiceCommunication',
+  RealtimeAudioEchoCancellationMechanism.webrtcApm: 'webrtc_apm',
+  RealtimeAudioEchoCancellationMechanism.platformAec: 'platform_aec',
 };

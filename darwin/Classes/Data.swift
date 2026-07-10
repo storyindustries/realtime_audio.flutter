@@ -4,13 +4,13 @@ enum RealtimeAudioRecordPermission: String, Codable {
   case granted
 }
 
-/// Which echo-cancellation mechanism the engine is driving. Raw values must
-/// match the Dart `RealtimeAudioEchoCancellationMechanism` enum names.
+/// Which echo-cancellation mechanism the engine is driving. Raw values are the
+/// wire form and must match the Dart `RealtimeAudioEchoCancellationMechanism`
+/// `@JsonValue`s.
 enum RealtimeAudioEchoCancellationMechanism: String {
   case none
-  case appleVoiceProcessingIO
-  case webRtcApm
-  case platformVoiceCommunication
+  case webRtcApm = "webrtc_apm"
+  case platformAec = "platform_aec"
 }
 
 struct RealtimeAudioState: Codable {
@@ -22,9 +22,9 @@ struct RealtimeAudioState: Codable {
 
   var chunkCount: Int
 
-  /// Device-truth ms rendered for the current stream. Latches across
-  /// stop/clearQueue/drain (see `ChunkAudioPlayerNode.playedMs`).
-  var renderedMs: Int
-  /// Whether the device is actively rendering queued PCM ahead of the head.
+  /// Completion-independent, call-lifetime render clock (ms). Folds across
+  /// stop/clearQueue/drain (see `ChunkAudioPlayerNode.lifetimeRenderClockMs`).
+  var renderClockMs: Int
+  /// Whether the device is actively rendering (outstanding buffers or hangover).
   var isRendering: Bool
 }

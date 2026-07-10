@@ -14,15 +14,17 @@ abstract class RealtimeAudioState with _$RealtimeAudioState {
     //
     @Default(0) int chunkCount,
     //
-    /// Device-truth milliseconds the player has actually rendered for the
-    /// current stream. Unlike [duration] (the live playback head, which resets
-    /// to `0` at stop), this **latches** its final value across
+    /// Completion-independent, **call-lifetime** render clock (ms) — the device
+    /// playback-head timeline, folded across stops (see
+    /// [RealtimeAudioPlaybackClock.renderClockMs]). Unlike [duration] (the live
+    /// per-segment head, which resets to `0` at stop), this survives
     /// stop/clearQueue/drain, so the terminal `isPlaying: false` state still
-    /// reports how much was rendered. Resets to `0` when a new stream begins.
-    @Default(0) int renderedMs,
+    /// reports the device-truth position. The consumer subtracts a baseline
+    /// captured at stream start.
+    @Default(0) int renderClockMs,
 
-    /// Whether the device is actively rendering queued PCM ahead of the head
-    /// (false when paused, stalled, drained, or stopped).
+    /// Whether the device is actively rendering right now (buffers outstanding
+    /// or within the post-drain hangover, and not paused).
     @Default(false) bool isRendering,
   }) = _RealtimeAudioState;
 

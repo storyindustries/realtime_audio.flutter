@@ -15,11 +15,19 @@ T _$identity<T>(T value) => value;
 /// @nodoc
 mixin _$RealtimeAudioPlaybackClock {
 
-/// Milliseconds of the current/last stream the device actually rendered.
- int get renderedMs;/// Whether the device is actively rendering queued PCM ahead of the head
-/// right now (false when paused, stalled, drained, or stopped).
- bool get isRendering;/// Total queued milliseconds of the current stream (rendered + pending).
- int get durationTotalMs;
+/// Completion-INDEPENDENT render clock (ms): the platform playback-head
+/// timeline (iOS `AVAudioPlayerNode.playerTime`, Android
+/// `AudioTrack.playbackHeadPosition`), folded across stops. Keeps advancing
+/// even when per-buffer completion callbacks stall or die — this is the
+/// device-truth "how much actually played out" signal.
+ int get renderClockMs;/// Completion-DRIVEN rendered ms: accumulated only from real playout
+/// completions (iOS `.dataPlayedBack`; flushed buffers never count). On
+/// Android — which has no per-buffer playout callback — this mirrors
+/// [renderClockMs].
+ int get renderedMs;/// Total ms ever scheduled onto the player (monotonic upper bound).
+ int get scheduledMs;/// Whether the device is actively rendering right now: buffers outstanding
+/// (or within the post-drain hangover), and not paused.
+ bool get isRendering;
 /// Create a copy of RealtimeAudioPlaybackClock
 /// with the given fields replaced by the non-null parameter values.
 @JsonKey(includeFromJson: false, includeToJson: false)
@@ -32,16 +40,16 @@ $RealtimeAudioPlaybackClockCopyWith<RealtimeAudioPlaybackClock> get copyWith => 
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is RealtimeAudioPlaybackClock&&(identical(other.renderedMs, renderedMs) || other.renderedMs == renderedMs)&&(identical(other.isRendering, isRendering) || other.isRendering == isRendering)&&(identical(other.durationTotalMs, durationTotalMs) || other.durationTotalMs == durationTotalMs));
+  return identical(this, other) || (other.runtimeType == runtimeType&&other is RealtimeAudioPlaybackClock&&(identical(other.renderClockMs, renderClockMs) || other.renderClockMs == renderClockMs)&&(identical(other.renderedMs, renderedMs) || other.renderedMs == renderedMs)&&(identical(other.scheduledMs, scheduledMs) || other.scheduledMs == scheduledMs)&&(identical(other.isRendering, isRendering) || other.isRendering == isRendering));
 }
 
 @JsonKey(includeFromJson: false, includeToJson: false)
 @override
-int get hashCode => Object.hash(runtimeType,renderedMs,isRendering,durationTotalMs);
+int get hashCode => Object.hash(runtimeType,renderClockMs,renderedMs,scheduledMs,isRendering);
 
 @override
 String toString() {
-  return 'RealtimeAudioPlaybackClock(renderedMs: $renderedMs, isRendering: $isRendering, durationTotalMs: $durationTotalMs)';
+  return 'RealtimeAudioPlaybackClock(renderClockMs: $renderClockMs, renderedMs: $renderedMs, scheduledMs: $scheduledMs, isRendering: $isRendering)';
 }
 
 
@@ -52,7 +60,7 @@ abstract mixin class $RealtimeAudioPlaybackClockCopyWith<$Res>  {
   factory $RealtimeAudioPlaybackClockCopyWith(RealtimeAudioPlaybackClock value, $Res Function(RealtimeAudioPlaybackClock) _then) = _$RealtimeAudioPlaybackClockCopyWithImpl;
 @useResult
 $Res call({
- int renderedMs, bool isRendering, int durationTotalMs
+ int renderClockMs, int renderedMs, int scheduledMs, bool isRendering
 });
 
 
@@ -69,12 +77,13 @@ class _$RealtimeAudioPlaybackClockCopyWithImpl<$Res>
 
 /// Create a copy of RealtimeAudioPlaybackClock
 /// with the given fields replaced by the non-null parameter values.
-@pragma('vm:prefer-inline') @override $Res call({Object? renderedMs = null,Object? isRendering = null,Object? durationTotalMs = null,}) {
+@pragma('vm:prefer-inline') @override $Res call({Object? renderClockMs = null,Object? renderedMs = null,Object? scheduledMs = null,Object? isRendering = null,}) {
   return _then(_self.copyWith(
-renderedMs: null == renderedMs ? _self.renderedMs : renderedMs // ignore: cast_nullable_to_non_nullable
+renderClockMs: null == renderClockMs ? _self.renderClockMs : renderClockMs // ignore: cast_nullable_to_non_nullable
+as int,renderedMs: null == renderedMs ? _self.renderedMs : renderedMs // ignore: cast_nullable_to_non_nullable
+as int,scheduledMs: null == scheduledMs ? _self.scheduledMs : scheduledMs // ignore: cast_nullable_to_non_nullable
 as int,isRendering: null == isRendering ? _self.isRendering : isRendering // ignore: cast_nullable_to_non_nullable
-as bool,durationTotalMs: null == durationTotalMs ? _self.durationTotalMs : durationTotalMs // ignore: cast_nullable_to_non_nullable
-as int,
+as bool,
   ));
 }
 
@@ -159,10 +168,10 @@ return $default(_that);case _:
 /// }
 /// ```
 
-@optionalTypeArgs TResult maybeWhen<TResult extends Object?>(TResult Function( int renderedMs,  bool isRendering,  int durationTotalMs)?  $default,{required TResult orElse(),}) {final _that = this;
+@optionalTypeArgs TResult maybeWhen<TResult extends Object?>(TResult Function( int renderClockMs,  int renderedMs,  int scheduledMs,  bool isRendering)?  $default,{required TResult orElse(),}) {final _that = this;
 switch (_that) {
 case _RealtimeAudioPlaybackClock() when $default != null:
-return $default(_that.renderedMs,_that.isRendering,_that.durationTotalMs);case _:
+return $default(_that.renderClockMs,_that.renderedMs,_that.scheduledMs,_that.isRendering);case _:
   return orElse();
 
 }
@@ -180,10 +189,10 @@ return $default(_that.renderedMs,_that.isRendering,_that.durationTotalMs);case _
 /// }
 /// ```
 
-@optionalTypeArgs TResult when<TResult extends Object?>(TResult Function( int renderedMs,  bool isRendering,  int durationTotalMs)  $default,) {final _that = this;
+@optionalTypeArgs TResult when<TResult extends Object?>(TResult Function( int renderClockMs,  int renderedMs,  int scheduledMs,  bool isRendering)  $default,) {final _that = this;
 switch (_that) {
 case _RealtimeAudioPlaybackClock():
-return $default(_that.renderedMs,_that.isRendering,_that.durationTotalMs);case _:
+return $default(_that.renderClockMs,_that.renderedMs,_that.scheduledMs,_that.isRendering);case _:
   throw StateError('Unexpected subclass');
 
 }
@@ -200,10 +209,10 @@ return $default(_that.renderedMs,_that.isRendering,_that.durationTotalMs);case _
 /// }
 /// ```
 
-@optionalTypeArgs TResult? whenOrNull<TResult extends Object?>(TResult? Function( int renderedMs,  bool isRendering,  int durationTotalMs)?  $default,) {final _that = this;
+@optionalTypeArgs TResult? whenOrNull<TResult extends Object?>(TResult? Function( int renderClockMs,  int renderedMs,  int scheduledMs,  bool isRendering)?  $default,) {final _that = this;
 switch (_that) {
 case _RealtimeAudioPlaybackClock() when $default != null:
-return $default(_that.renderedMs,_that.isRendering,_that.durationTotalMs);case _:
+return $default(_that.renderClockMs,_that.renderedMs,_that.scheduledMs,_that.isRendering);case _:
   return null;
 
 }
@@ -215,16 +224,25 @@ return $default(_that.renderedMs,_that.isRendering,_that.durationTotalMs);case _
 @JsonSerializable()
 
 class _RealtimeAudioPlaybackClock extends RealtimeAudioPlaybackClock {
-  const _RealtimeAudioPlaybackClock({this.renderedMs = 0, this.isRendering = false, this.durationTotalMs = 0}): super._();
+  const _RealtimeAudioPlaybackClock({this.renderClockMs = 0, this.renderedMs = 0, this.scheduledMs = 0, this.isRendering = false}): super._();
   factory _RealtimeAudioPlaybackClock.fromJson(Map<String, dynamic> json) => _$RealtimeAudioPlaybackClockFromJson(json);
 
-/// Milliseconds of the current/last stream the device actually rendered.
+/// Completion-INDEPENDENT render clock (ms): the platform playback-head
+/// timeline (iOS `AVAudioPlayerNode.playerTime`, Android
+/// `AudioTrack.playbackHeadPosition`), folded across stops. Keeps advancing
+/// even when per-buffer completion callbacks stall or die — this is the
+/// device-truth "how much actually played out" signal.
+@override@JsonKey() final  int renderClockMs;
+/// Completion-DRIVEN rendered ms: accumulated only from real playout
+/// completions (iOS `.dataPlayedBack`; flushed buffers never count). On
+/// Android — which has no per-buffer playout callback — this mirrors
+/// [renderClockMs].
 @override@JsonKey() final  int renderedMs;
-/// Whether the device is actively rendering queued PCM ahead of the head
-/// right now (false when paused, stalled, drained, or stopped).
+/// Total ms ever scheduled onto the player (monotonic upper bound).
+@override@JsonKey() final  int scheduledMs;
+/// Whether the device is actively rendering right now: buffers outstanding
+/// (or within the post-drain hangover), and not paused.
 @override@JsonKey() final  bool isRendering;
-/// Total queued milliseconds of the current stream (rendered + pending).
-@override@JsonKey() final  int durationTotalMs;
 
 /// Create a copy of RealtimeAudioPlaybackClock
 /// with the given fields replaced by the non-null parameter values.
@@ -239,16 +257,16 @@ Map<String, dynamic> toJson() {
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is _RealtimeAudioPlaybackClock&&(identical(other.renderedMs, renderedMs) || other.renderedMs == renderedMs)&&(identical(other.isRendering, isRendering) || other.isRendering == isRendering)&&(identical(other.durationTotalMs, durationTotalMs) || other.durationTotalMs == durationTotalMs));
+  return identical(this, other) || (other.runtimeType == runtimeType&&other is _RealtimeAudioPlaybackClock&&(identical(other.renderClockMs, renderClockMs) || other.renderClockMs == renderClockMs)&&(identical(other.renderedMs, renderedMs) || other.renderedMs == renderedMs)&&(identical(other.scheduledMs, scheduledMs) || other.scheduledMs == scheduledMs)&&(identical(other.isRendering, isRendering) || other.isRendering == isRendering));
 }
 
 @JsonKey(includeFromJson: false, includeToJson: false)
 @override
-int get hashCode => Object.hash(runtimeType,renderedMs,isRendering,durationTotalMs);
+int get hashCode => Object.hash(runtimeType,renderClockMs,renderedMs,scheduledMs,isRendering);
 
 @override
 String toString() {
-  return 'RealtimeAudioPlaybackClock(renderedMs: $renderedMs, isRendering: $isRendering, durationTotalMs: $durationTotalMs)';
+  return 'RealtimeAudioPlaybackClock(renderClockMs: $renderClockMs, renderedMs: $renderedMs, scheduledMs: $scheduledMs, isRendering: $isRendering)';
 }
 
 
@@ -259,7 +277,7 @@ abstract mixin class _$RealtimeAudioPlaybackClockCopyWith<$Res> implements $Real
   factory _$RealtimeAudioPlaybackClockCopyWith(_RealtimeAudioPlaybackClock value, $Res Function(_RealtimeAudioPlaybackClock) _then) = __$RealtimeAudioPlaybackClockCopyWithImpl;
 @override @useResult
 $Res call({
- int renderedMs, bool isRendering, int durationTotalMs
+ int renderClockMs, int renderedMs, int scheduledMs, bool isRendering
 });
 
 
@@ -276,12 +294,13 @@ class __$RealtimeAudioPlaybackClockCopyWithImpl<$Res>
 
 /// Create a copy of RealtimeAudioPlaybackClock
 /// with the given fields replaced by the non-null parameter values.
-@override @pragma('vm:prefer-inline') $Res call({Object? renderedMs = null,Object? isRendering = null,Object? durationTotalMs = null,}) {
+@override @pragma('vm:prefer-inline') $Res call({Object? renderClockMs = null,Object? renderedMs = null,Object? scheduledMs = null,Object? isRendering = null,}) {
   return _then(_RealtimeAudioPlaybackClock(
-renderedMs: null == renderedMs ? _self.renderedMs : renderedMs // ignore: cast_nullable_to_non_nullable
+renderClockMs: null == renderClockMs ? _self.renderClockMs : renderClockMs // ignore: cast_nullable_to_non_nullable
+as int,renderedMs: null == renderedMs ? _self.renderedMs : renderedMs // ignore: cast_nullable_to_non_nullable
+as int,scheduledMs: null == scheduledMs ? _self.scheduledMs : scheduledMs // ignore: cast_nullable_to_non_nullable
 as int,isRendering: null == isRendering ? _self.isRendering : isRendering // ignore: cast_nullable_to_non_nullable
-as bool,durationTotalMs: null == durationTotalMs ? _self.durationTotalMs : durationTotalMs // ignore: cast_nullable_to_non_nullable
-as int,
+as bool,
   ));
 }
 

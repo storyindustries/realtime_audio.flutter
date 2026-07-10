@@ -22,7 +22,10 @@ RealtimeAudioInstanceResponse _$RealtimeAudioInstanceResponseFromJson(
 /// @nodoc
 mixin _$RealtimeAudioInstanceResponse {
 
- RealtimeAudioClearQueueChunkData? get chunk;
+ RealtimeAudioClearQueueChunkData? get chunk;/// The call-lifetime playback counters, folded at the barge cut. Use
+/// `clock.renderClockMs` (minus the stream baseline) as the device-truth
+/// audible-stop position.
+ RealtimeAudioPlaybackClock? get clock;
 /// Create a copy of RealtimeAudioInstanceResponse
 /// with the given fields replaced by the non-null parameter values.
 @JsonKey(includeFromJson: false, includeToJson: false)
@@ -35,16 +38,16 @@ $RealtimeAudioInstanceResponseCopyWith<RealtimeAudioInstanceResponse> get copyWi
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is RealtimeAudioInstanceResponse&&(identical(other.chunk, chunk) || other.chunk == chunk));
+  return identical(this, other) || (other.runtimeType == runtimeType&&other is RealtimeAudioInstanceResponse&&(identical(other.chunk, chunk) || other.chunk == chunk)&&(identical(other.clock, clock) || other.clock == clock));
 }
 
 @JsonKey(includeFromJson: false, includeToJson: false)
 @override
-int get hashCode => Object.hash(runtimeType,chunk);
+int get hashCode => Object.hash(runtimeType,chunk,clock);
 
 @override
 String toString() {
-  return 'RealtimeAudioInstanceResponse(chunk: $chunk)';
+  return 'RealtimeAudioInstanceResponse(chunk: $chunk, clock: $clock)';
 }
 
 
@@ -55,11 +58,11 @@ abstract mixin class $RealtimeAudioInstanceResponseCopyWith<$Res>  {
   factory $RealtimeAudioInstanceResponseCopyWith(RealtimeAudioInstanceResponse value, $Res Function(RealtimeAudioInstanceResponse) _then) = _$RealtimeAudioInstanceResponseCopyWithImpl;
 @useResult
 $Res call({
- RealtimeAudioClearQueueChunkData? chunk
+ RealtimeAudioClearQueueChunkData? chunk, RealtimeAudioPlaybackClock? clock
 });
 
 
-$RealtimeAudioClearQueueChunkDataCopyWith<$Res>? get chunk;
+$RealtimeAudioClearQueueChunkDataCopyWith<$Res>? get chunk;$RealtimeAudioPlaybackClockCopyWith<$Res>? get clock;
 
 }
 /// @nodoc
@@ -72,10 +75,11 @@ class _$RealtimeAudioInstanceResponseCopyWithImpl<$Res>
 
 /// Create a copy of RealtimeAudioInstanceResponse
 /// with the given fields replaced by the non-null parameter values.
-@pragma('vm:prefer-inline') @override $Res call({Object? chunk = freezed,}) {
+@pragma('vm:prefer-inline') @override $Res call({Object? chunk = freezed,Object? clock = freezed,}) {
   return _then(_self.copyWith(
 chunk: freezed == chunk ? _self.chunk : chunk // ignore: cast_nullable_to_non_nullable
-as RealtimeAudioClearQueueChunkData?,
+as RealtimeAudioClearQueueChunkData?,clock: freezed == clock ? _self.clock : clock // ignore: cast_nullable_to_non_nullable
+as RealtimeAudioPlaybackClock?,
   ));
 }
 /// Create a copy of RealtimeAudioInstanceResponse
@@ -89,6 +93,18 @@ $RealtimeAudioClearQueueChunkDataCopyWith<$Res>? get chunk {
 
   return $RealtimeAudioClearQueueChunkDataCopyWith<$Res>(_self.chunk!, (value) {
     return _then(_self.copyWith(chunk: value));
+  });
+}/// Create a copy of RealtimeAudioInstanceResponse
+/// with the given fields replaced by the non-null parameter values.
+@override
+@pragma('vm:prefer-inline')
+$RealtimeAudioPlaybackClockCopyWith<$Res>? get clock {
+    if (_self.clock == null) {
+    return null;
+  }
+
+  return $RealtimeAudioPlaybackClockCopyWith<$Res>(_self.clock!, (value) {
+    return _then(_self.copyWith(clock: value));
   });
 }
 }
@@ -172,10 +188,10 @@ return clearQueue(_that);case _:
 /// }
 /// ```
 
-@optionalTypeArgs TResult maybeWhen<TResult extends Object?>({TResult Function( RealtimeAudioClearQueueChunkData? chunk)?  clearQueue,required TResult orElse(),}) {final _that = this;
+@optionalTypeArgs TResult maybeWhen<TResult extends Object?>({TResult Function( RealtimeAudioClearQueueChunkData? chunk,  RealtimeAudioPlaybackClock? clock)?  clearQueue,required TResult orElse(),}) {final _that = this;
 switch (_that) {
 case RealtimeAudioInstanceResponseClearQueue() when clearQueue != null:
-return clearQueue(_that.chunk);case _:
+return clearQueue(_that.chunk,_that.clock);case _:
   return orElse();
 
 }
@@ -193,10 +209,10 @@ return clearQueue(_that.chunk);case _:
 /// }
 /// ```
 
-@optionalTypeArgs TResult when<TResult extends Object?>({required TResult Function( RealtimeAudioClearQueueChunkData? chunk)  clearQueue,}) {final _that = this;
+@optionalTypeArgs TResult when<TResult extends Object?>({required TResult Function( RealtimeAudioClearQueueChunkData? chunk,  RealtimeAudioPlaybackClock? clock)  clearQueue,}) {final _that = this;
 switch (_that) {
 case RealtimeAudioInstanceResponseClearQueue():
-return clearQueue(_that.chunk);case _:
+return clearQueue(_that.chunk,_that.clock);case _:
   throw StateError('Unexpected subclass');
 
 }
@@ -213,10 +229,10 @@ return clearQueue(_that.chunk);case _:
 /// }
 /// ```
 
-@optionalTypeArgs TResult? whenOrNull<TResult extends Object?>({TResult? Function( RealtimeAudioClearQueueChunkData? chunk)?  clearQueue,}) {final _that = this;
+@optionalTypeArgs TResult? whenOrNull<TResult extends Object?>({TResult? Function( RealtimeAudioClearQueueChunkData? chunk,  RealtimeAudioPlaybackClock? clock)?  clearQueue,}) {final _that = this;
 switch (_that) {
 case RealtimeAudioInstanceResponseClearQueue() when clearQueue != null:
-return clearQueue(_that.chunk);case _:
+return clearQueue(_that.chunk,_that.clock);case _:
   return null;
 
 }
@@ -228,10 +244,14 @@ return clearQueue(_that.chunk);case _:
 @JsonSerializable()
 
 class RealtimeAudioInstanceResponseClearQueue implements RealtimeAudioInstanceResponse {
-  const RealtimeAudioInstanceResponseClearQueue({this.chunk});
+  const RealtimeAudioInstanceResponseClearQueue({this.chunk, this.clock});
   factory RealtimeAudioInstanceResponseClearQueue.fromJson(Map<String, dynamic> json) => _$RealtimeAudioInstanceResponseClearQueueFromJson(json);
 
 @override final  RealtimeAudioClearQueueChunkData? chunk;
+/// The call-lifetime playback counters, folded at the barge cut. Use
+/// `clock.renderClockMs` (minus the stream baseline) as the device-truth
+/// audible-stop position.
+@override final  RealtimeAudioPlaybackClock? clock;
 
 /// Create a copy of RealtimeAudioInstanceResponse
 /// with the given fields replaced by the non-null parameter values.
@@ -246,16 +266,16 @@ Map<String, dynamic> toJson() {
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is RealtimeAudioInstanceResponseClearQueue&&(identical(other.chunk, chunk) || other.chunk == chunk));
+  return identical(this, other) || (other.runtimeType == runtimeType&&other is RealtimeAudioInstanceResponseClearQueue&&(identical(other.chunk, chunk) || other.chunk == chunk)&&(identical(other.clock, clock) || other.clock == clock));
 }
 
 @JsonKey(includeFromJson: false, includeToJson: false)
 @override
-int get hashCode => Object.hash(runtimeType,chunk);
+int get hashCode => Object.hash(runtimeType,chunk,clock);
 
 @override
 String toString() {
-  return 'RealtimeAudioInstanceResponse.clearQueue(chunk: $chunk)';
+  return 'RealtimeAudioInstanceResponse.clearQueue(chunk: $chunk, clock: $clock)';
 }
 
 
@@ -266,11 +286,11 @@ abstract mixin class $RealtimeAudioInstanceResponseClearQueueCopyWith<$Res> impl
   factory $RealtimeAudioInstanceResponseClearQueueCopyWith(RealtimeAudioInstanceResponseClearQueue value, $Res Function(RealtimeAudioInstanceResponseClearQueue) _then) = _$RealtimeAudioInstanceResponseClearQueueCopyWithImpl;
 @override @useResult
 $Res call({
- RealtimeAudioClearQueueChunkData? chunk
+ RealtimeAudioClearQueueChunkData? chunk, RealtimeAudioPlaybackClock? clock
 });
 
 
-@override $RealtimeAudioClearQueueChunkDataCopyWith<$Res>? get chunk;
+@override $RealtimeAudioClearQueueChunkDataCopyWith<$Res>? get chunk;@override $RealtimeAudioPlaybackClockCopyWith<$Res>? get clock;
 
 }
 /// @nodoc
@@ -283,10 +303,11 @@ class _$RealtimeAudioInstanceResponseClearQueueCopyWithImpl<$Res>
 
 /// Create a copy of RealtimeAudioInstanceResponse
 /// with the given fields replaced by the non-null parameter values.
-@override @pragma('vm:prefer-inline') $Res call({Object? chunk = freezed,}) {
+@override @pragma('vm:prefer-inline') $Res call({Object? chunk = freezed,Object? clock = freezed,}) {
   return _then(RealtimeAudioInstanceResponseClearQueue(
 chunk: freezed == chunk ? _self.chunk : chunk // ignore: cast_nullable_to_non_nullable
-as RealtimeAudioClearQueueChunkData?,
+as RealtimeAudioClearQueueChunkData?,clock: freezed == clock ? _self.clock : clock // ignore: cast_nullable_to_non_nullable
+as RealtimeAudioPlaybackClock?,
   ));
 }
 
@@ -301,6 +322,18 @@ $RealtimeAudioClearQueueChunkDataCopyWith<$Res>? get chunk {
 
   return $RealtimeAudioClearQueueChunkDataCopyWith<$Res>(_self.chunk!, (value) {
     return _then(_self.copyWith(chunk: value));
+  });
+}/// Create a copy of RealtimeAudioInstanceResponse
+/// with the given fields replaced by the non-null parameter values.
+@override
+@pragma('vm:prefer-inline')
+$RealtimeAudioPlaybackClockCopyWith<$Res>? get clock {
+    if (_self.clock == null) {
+    return null;
+  }
+
+  return $RealtimeAudioPlaybackClockCopyWith<$Res>(_self.clock!, (value) {
+    return _then(_self.copyWith(clock: value));
   });
 }
 }
