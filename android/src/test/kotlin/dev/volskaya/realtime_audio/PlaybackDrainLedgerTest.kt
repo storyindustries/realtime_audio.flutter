@@ -69,4 +69,52 @@ internal class PlaybackDrainLedgerTest {
     assertEquals(800L, ledger.markWritten("new"))
     assertEquals(emptyList(), ledger.advancePlaybackHead(799).playedChunkIds)
   }
+
+  @Test
+  fun markerPassedBetweenReadAndArmSchedulesAsyncReconciliation() {
+    assertEquals(
+      PlaybackDrainSignalAction.RECONCILE_ASYNC,
+      PlaybackDrainSignal.decide(markerArmed = true, headAfterArm = 2_400, markerFrame = 2_400),
+    )
+  }
+
+  @Test
+  fun markerFailureFallsBackToExactHeadPolling() {
+    assertEquals(
+      PlaybackDrainSignalAction.POLL_EXACT_HEAD,
+      PlaybackDrainSignal.decide(markerArmed = false, headAfterArm = 2_399, markerFrame = 2_400),
+    )
+  }
+
+  @Test
+  fun markerFailureAfterHeadCrossedStillReconcilesAsynchronously() {
+    assertEquals(
+      PlaybackDrainSignalAction.RECONCILE_ASYNC,
+      PlaybackDrainSignal.decide(markerArmed = false, headAfterArm = 2_400, markerFrame = 2_400),
+    )
+  }
+
+  @Test
+  fun armedFutureMarkerWaitsForPlatformCallbackWithoutPolling() {
+    assertEquals(
+      PlaybackDrainSignalAction.WAIT_FOR_MARKER,
+      PlaybackDrainSignal.decide(markerArmed = true, headAfterArm = 2_399, markerFrame = 2_400),
+    )
+  }
+
+  @Test
+  fun fallbackPollIsBoundedAndGenerationSafe() {
+    val poll = PlaybackHeadFallbackPoll(generation = 7, markerFrame = 2_400, maxAttempts = 2)
+
+    assertEquals(PlaybackHeadPollAction.POLL_AGAIN, poll.observe(generation = 7, renderedFrame = 2_399))
+    assertEquals(PlaybackHeadPollAction.EXHAUSTED, poll.observe(generation = 7, renderedFrame = 2_399))
+    assertEquals(PlaybackHeadPollAction.CANCELLED, poll.observe(generation = 8, renderedFrame = 2_400))
+  }
+
+  @Test
+  fun fallbackPollReconcilesOnlyFromExactHeadEvidence() {
+    val poll = PlaybackHeadFallbackPoll(generation = 7, markerFrame = 2_400, maxAttempts = 2)
+
+    assertEquals(PlaybackHeadPollAction.RECONCILE, poll.observe(generation = 7, renderedFrame = 2_400))
+  }
 }

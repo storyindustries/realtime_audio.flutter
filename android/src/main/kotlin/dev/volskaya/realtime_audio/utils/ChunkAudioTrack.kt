@@ -8,6 +8,10 @@ import android.os.Handler
 import android.os.Looper
 import android.util.Log
 import dev.volskaya.realtime_audio.PlaybackDrainLedger
+import dev.volskaya.realtime_audio.PlaybackDrainSignal
+import dev.volskaya.realtime_audio.PlaybackDrainSignalAction
+import dev.volskaya.realtime_audio.PlaybackHeadFallbackPoll
+import dev.volskaya.realtime_audio.PlaybackHeadPollAction
 import dev.volskaya.realtime_audio.QueuedChunk
 import dev.volskaya.realtime_audio.RenderClock
 import dev.volskaya.realtime_audio.getBitRatio
@@ -43,6 +47,10 @@ class ChunkAudioTrack(
   private val pendingWrites = ArrayDeque<WriteCursor>()
   private val drainLedger = PlaybackDrainLedger()
   private var segmentDataSize = 0
+  private var playbackGeneration = 0L
+  private var armedMarkerGeneration: Long? = null
+  private var postedReconcileGeneration: Long? = null
+  private var fallbackPoll: PlaybackHeadFallbackPoll? = null
 
   val queue: List<QueuedChunk> get() = synchronized(lock) { chunks.toList() }
   val totalDataSize: Int get() = synchronized(lock) { segmentDataSize }
@@ -173,15 +181,15 @@ class ChunkAudioTrack(
           return
         }
 
-        val chunkFinishedWriting = synchronized(lock) {
+        val reconcileGeneration = synchronized(lock) {
           if (thread !== currentThread) return
           cursor.byteOffset += written
-          if (cursor.byteOffset < cursor.chunk.data.size) return@synchronized false
+          if (cursor.byteOffset < cursor.chunk.data.size) return@synchronized null
           pendingWrites.removeFirst()
           drainLedger.markWritten(cursor.chunk.id)
-          true
+          playbackGeneration
         }
-        if (chunkFinishedWriting) mainLooperHandler.post(::reconcilePlaybackHead)
+        reconcileGeneration?.let(::schedulePlaybackHeadReconciliation)
       }
     } finally {
       val restart = synchronized(lock) {
@@ -193,22 +201,57 @@ class ChunkAudioTrack(
     }
   }
 
-  private fun armPlaybackMarker(frame: Long) {
-    val result = setNotificationMarkerPosition(frame.toInt())
-    if (result != SUCCESS) {
-      val message = "AudioTrack marker setup failed with code $result at frame $frame"
-      Log.e("RealtimeAudio", message)
-      eventListener.get()?.onPlaybackDrainError(message)
+  private fun armPlaybackMarker(frame: Long, generation: Long) {
+    val result = synchronized(lock) {
+      if (generation != playbackGeneration) return
+      setNotificationMarkerPosition(frame.toInt()).also {
+        armedMarkerGeneration = if (it == SUCCESS) generation else null
+        if (it == SUCCESS) fallbackPoll = null
+      }
+    }
+    val markerArmed = result == SUCCESS
+    if (!markerArmed) {
+      reportPlaybackDrainError("AudioTrack marker setup failed with code $result at frame $frame")
+    }
+
+    when (PlaybackDrainSignal.decide(markerArmed, renderedFramesNow, frame)) {
+      PlaybackDrainSignalAction.WAIT_FOR_MARKER -> Unit
+      PlaybackDrainSignalAction.RECONCILE_ASYNC -> schedulePlaybackHeadReconciliation(generation)
+      PlaybackDrainSignalAction.POLL_EXACT_HEAD -> startPlaybackHeadFallbackPoll(generation, frame)
     }
   }
 
   override fun onMarkerReached(track: AudioTrack?) {
     if (track !== this) return
-    reconcilePlaybackHead()
+    val generation = synchronized(lock) { armedMarkerGeneration } ?: return
+    schedulePlaybackHeadReconciliation(generation)
   }
 
-  private fun reconcilePlaybackHead() {
+  private fun schedulePlaybackHeadReconciliation(generation: Long) {
+    val shouldPost = synchronized(lock) {
+      if (generation != playbackGeneration || postedReconcileGeneration == generation) {
+        false
+      } else {
+        postedReconcileGeneration = generation
+        true
+      }
+    }
+    if (!shouldPost) return
+
+    mainLooperHandler.post {
+      val isCurrent = synchronized(lock) {
+        if (postedReconcileGeneration == generation) postedReconcileGeneration = null
+        generation == playbackGeneration
+      }
+      if (isCurrent) reconcilePlaybackHead(generation)
+    }
+  }
+
+  private fun reconcilePlaybackHead(generation: Long) {
     val advance = synchronized(lock) {
+      if (generation != playbackGeneration) return
+      armedMarkerGeneration = null
+      fallbackPoll = null
       val result = drainLedger.advancePlaybackHead(renderedFramesNow)
       if (result.playedChunkIds.isNotEmpty()) {
         val played = result.playedChunkIds.toSet()
@@ -218,8 +261,50 @@ class ChunkAudioTrack(
     }
 
     advance.playedChunkIds.forEach(::handleChunkPlayed)
-    advance.nextMarkerFrame?.let(::armPlaybackMarker)
+    advance.nextMarkerFrame?.let { armPlaybackMarker(it, generation) }
     if (advance.drained) handleQueueEnded()
+  }
+
+  private fun startPlaybackHeadFallbackPoll(generation: Long, markerFrame: Long) {
+    val poll = synchronized(lock) {
+      if (generation != playbackGeneration) return
+      fallbackPoll
+        ?.takeIf { it.generation == generation && it.markerFrame == markerFrame }
+        ?: PlaybackHeadFallbackPoll(
+          generation = generation,
+          markerFrame = markerFrame,
+          maxAttempts = PLAYBACK_HEAD_POLL_MAX_ATTEMPTS,
+        ).also { fallbackPoll = it }
+    }
+    schedulePlaybackHeadFallbackPoll(poll)
+  }
+
+  private fun schedulePlaybackHeadFallbackPoll(poll: PlaybackHeadFallbackPoll) {
+    mainLooperHandler.postDelayed({
+      val action = synchronized(lock) {
+        if (fallbackPoll !== poll) return@postDelayed
+        poll.observe(playbackGeneration, renderedFramesNow)
+      }
+      when (action) {
+        PlaybackHeadPollAction.POLL_AGAIN -> schedulePlaybackHeadFallbackPoll(poll)
+        PlaybackHeadPollAction.RECONCILE -> schedulePlaybackHeadReconciliation(poll.generation)
+        PlaybackHeadPollAction.CANCELLED -> Unit
+        PlaybackHeadPollAction.EXHAUSTED -> {
+          synchronized(lock) {
+            if (fallbackPoll === poll) fallbackPoll = null
+          }
+          reportPlaybackDrainError(
+            "AudioTrack playback head did not reach marker ${poll.markerFrame} " +
+              "after $PLAYBACK_HEAD_POLL_MAX_ATTEMPTS exact-head checks"
+          )
+        }
+      }
+    }, PLAYBACK_HEAD_POLL_INTERVAL_MS)
+  }
+
+  private fun reportPlaybackDrainError(message: String) {
+    Log.e("RealtimeAudio", message)
+    eventListener.get()?.onPlaybackDrainError(message)
   }
 
   override fun onPeriodicNotification(track: AudioTrack?) {
@@ -240,6 +325,7 @@ class ChunkAudioTrack(
     isPlaybackActive = false
 
     val discarded = synchronized(lock) {
+      playbackGeneration += 1
       writesEnabled = false
       thread?.interrupt()
       thread = null
@@ -248,6 +334,9 @@ class ChunkAudioTrack(
       chunks.clear()
       pendingWrites.clear()
       drainLedger.reset()
+      armedMarkerGeneration = null
+      postedReconcileGeneration = null
+      fallbackPoll = null
       segmentDataSize = 0
       values
     }
@@ -295,6 +384,8 @@ class ChunkAudioTrack(
     /// Post-drain hangover: keep reporting "rendering" briefly after the last
     /// buffer drains, covering speaker ring-out / output pipeline latency.
     private const val RENDER_HANGOVER_NS = 200_000_000L
+    private const val PLAYBACK_HEAD_POLL_INTERVAL_MS = 10L
+    private const val PLAYBACK_HEAD_POLL_MAX_ATTEMPTS = 200
   }
 
 }

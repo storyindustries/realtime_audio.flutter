@@ -6,6 +6,63 @@ data class PlaybackHeadAdvance(
   val drained: Boolean,
 )
 
+enum class PlaybackDrainSignalAction {
+  WAIT_FOR_MARKER,
+  RECONCILE_ASYNC,
+  POLL_EXACT_HEAD,
+}
+
+/** Chooses the race-safe follow-up after arming an exact playback marker. */
+object PlaybackDrainSignal {
+  fun decide(
+    markerArmed: Boolean,
+    headAfterArm: Long,
+    markerFrame: Long,
+  ): PlaybackDrainSignalAction = when {
+    headAfterArm >= markerFrame -> PlaybackDrainSignalAction.RECONCILE_ASYNC
+    markerArmed -> PlaybackDrainSignalAction.WAIT_FOR_MARKER
+    else -> PlaybackDrainSignalAction.POLL_EXACT_HEAD
+  }
+}
+
+enum class PlaybackHeadPollAction {
+  POLL_AGAIN,
+  RECONCILE,
+  EXHAUSTED,
+  CANCELLED,
+}
+
+/**
+ * Bounded fallback for devices that reject playback markers. Decisions use
+ * only the hardware playback head; wall-clock time never implies rendering.
+ */
+class PlaybackHeadFallbackPoll(
+  val generation: Long,
+  val markerFrame: Long,
+  maxAttempts: Int,
+) {
+  private var attemptsRemaining = maxAttempts
+
+  init {
+    require(maxAttempts > 0)
+  }
+
+  fun observe(
+    generation: Long,
+    renderedFrame: Long,
+  ): PlaybackHeadPollAction {
+    if (generation != this.generation) return PlaybackHeadPollAction.CANCELLED
+    if (renderedFrame >= markerFrame) return PlaybackHeadPollAction.RECONCILE
+
+    attemptsRemaining -= 1
+    return if (attemptsRemaining > 0) {
+      PlaybackHeadPollAction.POLL_AGAIN
+    } else {
+      PlaybackHeadPollAction.EXHAUSTED
+    }
+  }
+}
+
 /**
  * Pure device-playout ledger. Submitting bytes to `AudioTrack.write()` only
  * marks a chunk writable; ownership ends after the playback head reaches the
