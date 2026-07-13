@@ -57,6 +57,7 @@ class ChunkAudioTrack(
 
   private var renderClockBaseMs = 0.0
   private var scheduledMsAccum = 0.0
+  private var segmentScheduledMs = 0.0
   private var lastPlaybackEndedAtNs: Long? = null
 
   /// Wrap-safe playback-head position in frames (see [RenderClock.renderedFrames]).
@@ -88,7 +89,7 @@ class ChunkAudioTrack(
   /// gating is applied by the engine (which owns the paused state).
   val isRenderingPlaybackRaw: Boolean
     get() {
-      if (isPlaybackActive && lifetimeRenderClockMs < lifetimeScheduledMs) return true
+      if (isPlaybackActive && RenderClock.isSegmentRendering(currentSegmentMs(), segmentScheduledMs)) return true
       val ended = lastPlaybackEndedAtNs ?: return false
       return (System.nanoTime() - ended) < RENDER_HANGOVER_NS
     }
@@ -104,6 +105,7 @@ class ChunkAudioTrack(
 
     // Scheduled-ms upper bound: bytes -> frames -> ms at the output rate.
     scheduledMsAccum += RenderClock.framesToMs((data.size / bitRatio).toLong(), sampleRate)
+    segmentScheduledMs += RenderClock.framesToMs((data.size / bitRatio).toLong(), sampleRate)
 
     queue.add(queuedChunkEntry)
     eventListener.get()?.onChunkQueued(id)
@@ -180,6 +182,7 @@ class ChunkAudioTrack(
     thread = null
     isChunkQueueStartedNeeded = true
     super.stop()
+    segmentScheduledMs = 0.0
 
     while (queue.isNotEmpty()) {
       queue.removeAt(0).let { eventListener.get()?.onChunkPlayed(it.id) }

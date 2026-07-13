@@ -204,6 +204,35 @@ class RealtimeAudio(
       }
 
       "getPlayerPlayedDuration" -> value = playbackClockMap()
+      "repairPlaybackAccounting" -> {
+        val expectedScheduledMs = call.argument<Int>("expectedScheduledMs")
+          ?: throw Error("Missing expectedScheduledMs for ${call.method}.")
+        val reason = if (expectedScheduledMs == audioTrack.lifetimeScheduledMs) {
+          "no_outstanding_buffers"
+        } else {
+          "scheduled_extent_changed"
+        }
+        value = mapOf(
+          "repaired" to false,
+          "reason" to reason,
+          "clock" to playbackClockMap(),
+        )
+      }
+      "recoverWedgedPlayback" -> {
+        if (!shouldBeRunning || shouldBePaused) {
+          value = mapOf(
+            "recovered" to false,
+            "message" to "Audio engine is not actively started.",
+            "clock" to playbackClockMap(),
+          )
+        } else {
+          stopAudio()
+          value = mapOf(
+            "recovered" to true,
+            "clock" to playbackClockMap(),
+          )
+        }
+      }
       "getEchoCancellationState" -> value = echoCancellationStateMap()
 
       "start" -> start()
