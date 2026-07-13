@@ -148,7 +148,9 @@ only when the engine is actually stopped; a healthy graph is left running.
 discrimination). Android has no per-buffer playout callback, so `renderedMs`
 mirrors the head-based `renderClockMs`; `isRendering` compares the current
 playback-head segment with its own scheduled extent so an older flushed stream
-cannot leave permanent lifetime-scheduled debt.
+cannot leave permanent lifetime-scheduled debt. Android chunk completion and
+natural drain are emitted only when the hardware playback head reaches exact
+chunk-end markers—`AudioTrack.write()` acceptance is never treated as playout.
 
 ## 🎧 Full-duplex trust (AEC read-back)
 

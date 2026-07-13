@@ -5,5 +5,5 @@ interface ChunkAudioEventListener {
   fun onChunkPlayed(id: String)
   fun onChunkQueueStarted(id: String)
   fun onChunkQueueEnded()
+  fun onPlaybackDrainError(message: String)
 }
-

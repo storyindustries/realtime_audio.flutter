@@ -3,6 +3,7 @@ enum RealtimeAudioEngineHealthEventType {
   configurationChangeRecoveryStarted,
   configurationChangeRecovered,
   configurationChangeRecoveryFailed,
+  playbackDrainSignalFailed,
   unknown;
 
   static RealtimeAudioEngineHealthEventType fromWire(String value) {
@@ -11,6 +12,7 @@ enum RealtimeAudioEngineHealthEventType {
       'configuration_change_recovery_started' => configurationChangeRecoveryStarted,
       'configuration_change_recovered' => configurationChangeRecovered,
       'configuration_change_recovery_failed' => configurationChangeRecoveryFailed,
+      'playback_drain_signal_failed' => playbackDrainSignalFailed,
       _ => unknown,
     };
   }
