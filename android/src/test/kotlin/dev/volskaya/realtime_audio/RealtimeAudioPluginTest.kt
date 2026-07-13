@@ -85,4 +85,13 @@ internal class RealtimeAudioPluginTest {
     assertEquals(1500, baseMs.roundToInt())
     assertTrue(lifetimeDuringB > lifetimeAfterAStop, "lifetime clock must be monotonic across the fold")
   }
+
+  @Test
+  fun isSegmentRendering_ignoresScheduledDebtFromPreviouslyFlushedAudio() {
+    // Lifetime scheduled can remain ahead after a flush, but rendering state is
+    // local to the current AudioTrack segment. A fully rendered current segment
+    // must drain even when older lifetime audio was intentionally discarded.
+    assertTrue(RenderClock.isSegmentRendering(renderedMs = 3_999.0, scheduledMs = 4_000.0))
+    assertEquals(false, RenderClock.isSegmentRendering(renderedMs = 4_000.0, scheduledMs = 4_000.0))
+  }
 }

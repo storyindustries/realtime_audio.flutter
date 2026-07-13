@@ -80,6 +80,7 @@ class RealtimeAudio: NSObject {
 
   private var shouldBeStarted = false
   private var shouldBePaused = false
+  private var configurationRecoveryIsRunning = false
   private var isDisposed = false
   private var isDeinitialized = false
 
@@ -184,22 +185,92 @@ class RealtimeAudio: NSObject {
       self,
       selector: #selector(handleAudioEngineConfigurationChange),
       name: .AVAudioEngineConfigurationChange,
-      object: nil
+      object: audioEngine
     )
   }
 
   @objc private func handleAudioEngineConfigurationChange(notification: NSNotification) {
     DispatchQueue.main.async { [weak self] in
       guard let self else { return }
-      methodChannel.invokeMethod(
-        "echo", arguments: "Audio engine configuration changed, need to restart. \(shouldBeStarted)")
-      do {
-        try restart()
-      } catch {
-        print("Failed to restart after configuration change.")
-        print(error)
+      let engineWasRunning = audioEngine.isRunning
+      let decision = AudioEngineConfigurationRecoveryPolicy.decide(
+        shouldBeStarted: shouldBeStarted,
+        shouldBePaused: shouldBePaused,
+        engineIsRunning: engineWasRunning,
+        recoveryIsRunning: configurationRecoveryIsRunning
+      )
+
+      switch decision {
+      case .ignoreInactiveEngine, .ignoreRecoveryInProgress:
+        return
+      case .ignoreHealthyEngine:
+        notifyEngineHealth(
+          type: "configuration_change_ignored_healthy",
+          engineWasRunning: engineWasRunning
+        )
+      case .restartStoppedEnginePreservingPlayback:
+        configurationRecoveryIsRunning = true
+        notifyEngineHealth(
+          type: "configuration_change_recovery_started",
+          engineWasRunning: engineWasRunning
+        )
+        defer { configurationRecoveryIsRunning = false }
+
+        do {
+          try recoverStoppedEnginePreservingPlayback()
+          notifyEngineHealth(
+            type: "configuration_change_recovered",
+            engineWasRunning: engineWasRunning
+          )
+        } catch {
+          notifyEngineHealth(
+            type: "configuration_change_recovery_failed",
+            engineWasRunning: engineWasRunning,
+            message: error.localizedDescription
+          )
+        }
       }
     }
+  }
+
+  private func notifyEngineHealth(
+    type: String,
+    engineWasRunning: Bool,
+    message: String? = nil
+  ) {
+    var event: [String: Any] = [
+      "type": type,
+      "engineWasRunning": engineWasRunning,
+      "queuedChunkCount": audioPlayerNode.queue.count,
+    ]
+    if let message { event["message"] = message }
+    methodChannel.invokeMethod("audioEngineHealth", arguments: event)
+  }
+
+  /// Rebuild only the capture tap after a system-driven engine stop. Calling
+  /// `stop()` or `reset()` here would discard `AVAudioPlayerNode`'s scheduled
+  /// buffers and cut the current utterance.
+  private func recoverStoppedEnginePreservingPlayback() throws {
+    try AudioEngineConfigurationRecovery.recoverStoppedEngine(
+      reinstallCapture: { try installTap() },
+      startEngine: { try audioEngine.start() },
+      removeCaptureAfterFailure: {
+        if isRecorderEnabled {
+          audioEngine.inputNode.removeTap(onBus: recorderPreferredBus)
+        }
+      },
+      resumePreservedPlayback: {
+        playBackground()
+
+        guard !shouldBePaused, !audioPlayerNode.queue.isEmpty else { return }
+        changeVolume()
+        // The engine may stop while the player still reports `isPlaying`; drive
+        // it explicitly so the preserved buffers resume rendering.
+        audioPlayerNode.play()
+        attachTimers()
+        notifyPlayerState(isPaused: false)
+      }
+    )
   }
 
   private func changeVolume() {
@@ -456,6 +527,24 @@ extension RealtimeAudio {
     case "getPlayerPlayedDuration":
       value = playbackClockMap()
       break
+    case "repairPlaybackAccounting":
+      guard let arguments = call.arguments as? [String: Any] else {
+        throw TextError("Missing arguments for \(call.method)")
+      }
+      guard let expectedScheduledMs = arguments["expectedScheduledMs"] as? Int else {
+        throw TextError("Missing expectedScheduledMs for: \(call.method).")
+      }
+      let outcome = audioPlayerNode.repairPlaybackAccounting(expectedScheduledMs: expectedScheduledMs)
+      notifyPlayerState(isPaused: nil)
+      value = [
+        "repaired": outcome == .repaired,
+        "reason": outcome.rawValue,
+        "clock": playbackClockMap(),
+      ]
+      break
+    case "recoverWedgedPlayback":
+      value = recoverWedgedPlaybackMap()
+      break
     case "getEchoCancellationState":
       value = echoCancellationStateMap()
       break
@@ -510,6 +599,41 @@ extension RealtimeAudio {
     } else {
       result(FlutterMethodNotImplemented)
     }
+  }
+}
+
+extension RealtimeAudio {
+  private func recoverWedgedPlaybackMap() -> [String: Any] {
+    guard shouldBeStarted, !shouldBePaused else {
+      return [
+        "recovered": false,
+        "message": "Audio engine is not actively started.",
+        "clock": playbackClockMap(),
+      ]
+    }
+
+    // A true wedge is destructive by definition: the independent render clock
+    // is frozen and scheduled audio cannot progress. Fold the clock and discard
+    // the stranded player queue before restoring readiness.
+    let recoveryDecision = PlaybackWedgeRecoveryPolicy.decide(engineIsRunning: audioEngine.isRunning)
+    stopAudio()
+    if recoveryDecision == .discardPlayerAndRestartEngine {
+      audioEngine.prepare()
+      do {
+        try audioEngine.start()
+      } catch {
+        return [
+          "recovered": false,
+          "message": error.localizedDescription,
+          "clock": playbackClockMap(),
+        ]
+      }
+    }
+
+    return [
+      "recovered": audioEngine.isRunning,
+      "clock": playbackClockMap(),
+    ]
   }
 }
 

@@ -23,4 +23,9 @@ object RenderClock {
    */
   fun framesToMs(frames: Long, sampleRate: Int): Double =
     if (sampleRate <= 0 || frames <= 0L) 0.0 else (frames.toDouble() / sampleRate) * 1000.0
+
+  /** Rendering state belongs to the current playback-head segment. Lifetime
+   * scheduled totals include intentionally flushed audio and cannot be used as
+   * the current segment's drain target. */
+  fun isSegmentRendering(renderedMs: Double, scheduledMs: Double): Boolean = renderedMs < scheduledMs
 }

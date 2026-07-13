@@ -6,8 +6,10 @@ import 'package:flutter/services.dart';
 import 'package:realtime_audio/src/data/other.dart';
 import 'package:realtime_audio/src/data/realtime_audio_arguments.dart';
 import 'package:realtime_audio/src/data/realtime_audio_echo_cancellation_state.dart';
+import 'package:realtime_audio/src/data/realtime_audio_engine_health_event.dart';
 import 'package:realtime_audio/src/data/realtime_audio_instance_response.dart';
 import 'package:realtime_audio/src/data/realtime_audio_playback_clock.dart';
+import 'package:realtime_audio/src/data/realtime_audio_playback_recovery.dart';
 import 'package:realtime_audio/src/data/realtime_audio_queue_entry.dart';
 import 'package:realtime_audio/src/data/realtime_audio_response.dart';
 import 'package:realtime_audio/src/data/realtime_audio_state.dart';
@@ -76,6 +78,8 @@ class RealtimeAudio {
   final StreamController<Uint8List> _recorderStreamController = StreamController<Uint8List>();
   final StreamController<RealtimeAudioState> _stateStreamController = StreamController<RealtimeAudioState>();
   final StreamController<String> _recorderErrorStreamController = StreamController<String>.broadcast();
+  final StreamController<RealtimeAudioEngineHealthEvent> _engineHealthStreamController =
+      StreamController<RealtimeAudioEngineHealthEvent>.broadcast();
 
   Stream<Uint8List> get recorderStream => _recorderStreamController.stream;
   Stream<RealtimeAudioState> get stateStream => _stateStreamController.stream;
@@ -90,6 +94,9 @@ class RealtimeAudio {
   /// AudioRecord state errors). Broadcast so it can be subscribed to
   /// independently of the recorder data stream.
   Stream<String> get recorderErrorStream => _recorderErrorStreamController.stream;
+
+  /// Native audio-engine configuration and recovery outcomes.
+  Stream<RealtimeAudioEngineHealthEvent> get engineHealthStream => _engineHealthStreamController.stream;
 
   String? _id;
   MethodChannel? _channel;
@@ -153,6 +160,12 @@ class RealtimeAudio {
         }
         if (!_recorderErrorStreamController.isClosed) {
           _recorderErrorStreamController.sink.add(message);
+        }
+        break;
+      case 'audioEngineHealth':
+        final arguments = Map<String, dynamic>.from(call.arguments as Map);
+        if (!_engineHealthStreamController.isClosed) {
+          _engineHealthStreamController.sink.add(RealtimeAudioEngineHealthEvent.fromMap(arguments));
         }
         break;
       case 'chunkQueued':
@@ -313,6 +326,27 @@ class RealtimeAudio {
   Future<RealtimeAudioPlaybackClock?> getPlayerPlayedDuration() => _withInitAndLock(
       () async => _channel?.invokeMethodData('getPlayerPlayedDuration', RealtimeAudioPlaybackClock.fromJson));
 
+  /// Clear stranded completion accounting after the caller has proven, from
+  /// per-stream render-clock deltas, that the snapshotted scheduled extent was
+  /// rendered. The native compare-and-repair rejects a stale extent if new
+  /// audio was queued. This never stops the player or discards scheduled PCM.
+  Future<RealtimeAudioPlaybackAccountingRepair?> repairPlaybackAccounting({
+    required int expectedScheduledMs,
+  }) =>
+      _withInitAndLock(
+        () async => _channel?.invokeMethodData(
+          'repairPlaybackAccounting',
+          RealtimeAudioPlaybackAccountingRepair.fromMap,
+          {'expectedScheduledMs': expectedScheduledMs},
+        ),
+      );
+
+  /// Destructively discard a playback wedge and restore player readiness.
+  /// Unlike [repairPlaybackAccounting], this intentionally stops the player.
+  Future<RealtimeAudioPlaybackWedgeRecovery?> recoverWedgedPlayback() => _withInitAndLock(
+      () async =>
+          _channel?.invokeMethodData('recoverWedgedPlayback', RealtimeAudioPlaybackWedgeRecovery.fromMap));
+
   /// Read back whether echo cancellation is actually active for the current
   /// capture path (never assumed), plus whether mic capture has proven live.
   ///
@@ -366,6 +400,8 @@ class RealtimeAudio {
         _recorderStreamController.sink.close();
         _recorderErrorStreamController.close();
         _recorderErrorStreamController.sink.close();
+        _engineHealthStreamController.close();
+        _engineHealthStreamController.sink.close();
         _stateStreamController.close();
         _stateStreamController.sink.close();
         if (_id != null) await RealtimeAudioArguments.destroy(id: _id!).invoke(_staticChannel);

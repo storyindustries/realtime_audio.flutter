@@ -118,10 +118,37 @@ disowns their late completions).
 `isRendering` is `true` while buffers are outstanding or within a 0.2 s
 post-drain hangover (speaker ring-out), and `false` while paused.
 
+### Rendered-out accounting vs. a true wedge
+
+If `.dataPlayedBack` callbacks die, compare per-stream deltas from the three
+counters. When the independent render clock reached the scheduled extent, clear
+only the stranded completion accounting:
+
+```dart
+final result = await audio.repairPlaybackAccounting(
+  expectedScheduledMs: clock.scheduledMs,
+);
+// A new chunk changes scheduledMs, so a stale repair is rejected atomically.
+```
+
+This repair bumps the completion generation and retires the rendered chunks
+without stopping the player; late callbacks from the repaired generation are
+ignored. If both the render clock and completion counter are frozen instead,
+the player is genuinely wedged and can be destructively recovered:
+
+```dart
+final result = await audio.recoverWedgedPlayback();
+```
+
+That API intentionally discards the player queue. It restarts the audio engine
+only when the engine is actually stopped; a healthy graph is left running.
+
 **Platform notes.** iOS counts real playout via `.dataPlayedBack` completions, so
 `renderedMs` is independent of `renderClockMs` (enabling wedge-vs-rendered-out
 discrimination). Android has no per-buffer playout callback, so `renderedMs`
-mirrors the head-based `renderClockMs`.
+mirrors the head-based `renderClockMs`; `isRendering` compares the current
+playback-head segment with its own scheduled extent so an older flushed stream
+cannot leave permanent lifetime-scheduled debt.
 
 ## 🎧 Full-duplex trust (AEC read-back)
 
@@ -144,3 +171,22 @@ final aec = await audio.getEchoCancellationState();
   otherwise the engine relies on the platform `VOICE_COMMUNICATION` capture
   source (`platformAec`), whose liveness cannot be read back (`nativeEnabled` is
   then `false`).
+
+## 🩺 Audio-engine health
+
+iOS and macOS can stop an audio engine after a real route or format change. The
+plugin restarts that stopped engine without stopping the player, preserving any
+scheduled speech. Benign configuration notifications received while the engine
+is still running do not trigger recovery.
+
+Subscribe to structured outcomes when the host application needs telemetry or
+user-visible recovery handling:
+
+```dart
+audio.engineHealthStream.listen((event) {
+  // event.type — ignored healthy notification, recovery start/success/failure
+  // event.engineWasRunning — native state when the notification was handled
+  // event.queuedChunkCount — scheduled chunks owned by the player
+  // event.message — native failure detail, when recovery failed
+});
+```

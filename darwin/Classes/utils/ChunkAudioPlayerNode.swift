@@ -5,7 +5,7 @@ class ChunkAudioPlayerNode: AVAudioPlayerNode {
   private var outputFormat: AVAudioFormat
 
   var queue: [ChunkEntry] = []
-  var totalSampleTime: UInt32 { (queue.last?.offset ?? 0) + (queue.last?.buffer.frameLength ?? 0) }
+  var totalSampleTime: UInt32 { queueTimeline.totalFrames }
 
   private var isChunkQueueStartedNeeded = true
   private let converter: PCMStreamConverter
@@ -23,19 +23,8 @@ class ChunkAudioPlayerNode: AVAudioPlayerNode {
   /// segment (`playerTime`) is added on top; before every stop the current
   /// segment is folded in so the value survives the head reset.
   private var renderClockBaseMs: Double = 0
-  /// Completion-DRIVEN rendered ms — accumulated only from `.dataPlayedBack`
-  /// completions of buffers that were NOT flushed (generation-guarded).
-  private var completionRenderedMs: Double = 0
-  /// Total ms ever scheduled onto the player (monotonic upper bound).
-  private var scheduledMsAccum: Double = 0
-  /// Bumped whenever queued buffers are dropped (stop/flush) so late completions
-  /// of flushed buffers are ignored and never counted as rendered.
-  private var generation: Int = 0
-  /// Buffers scheduled but not yet completed (or dropped).
-  private var outstandingBuffers: Int = 0
-  /// Monotonic host time (s) when playback last reached zero outstanding
-  /// buffers — drives the render hangover.
-  private var lastPlaybackEndedAt: TimeInterval?
+  private var accounting = PlaybackBufferAccounting()
+  private var queueTimeline = PlaybackQueueTimeline()
 
   /// Post-drain hangover: keep reporting "rendering" briefly after the last
   /// buffer drains, covering speaker ring-out / output pipeline latency.
@@ -59,16 +48,18 @@ class ChunkAudioPlayerNode: AVAudioPlayerNode {
   /// completions (derived from the render timeline) and player stops (folded).
   var lifetimeRenderClockMs: Int { Int((renderClockBaseMs + currentSegmentMs()).rounded()) }
   /// Completion-DRIVEN lifetime rendered ms (`.dataPlayedBack`, flush-excluded).
-  var lifetimeRenderedMs: Int { Int(completionRenderedMs.rounded()) }
+  var lifetimeRenderedMs: Int { accounting.renderedMs }
   /// Lifetime ms scheduled onto the player (monotonic upper bound).
-  var lifetimeScheduledMs: Int { Int(scheduledMsAccum.rounded()) }
+  var lifetimeScheduledMs: Int { accounting.scheduledMs }
 
   /// Whether the device is actively rendering: buffers outstanding, or within
   /// the post-drain hangover window. Pause gating is applied by the engine
   /// (which owns the paused state).
   var isRenderingPlaybackRaw: Bool {
-    if outstandingBuffers > 0 { return true }
-    if let ended = lastPlaybackEndedAt { return (ProcessInfo.processInfo.systemUptime - ended) < Self.renderHangover }
+    if accounting.outstandingBuffers > 0 { return true }
+    if let ended = accounting.lastPlaybackEndedAt {
+      return (ProcessInfo.processInfo.systemUptime - ended) < Self.renderHangover
+    }
     return false
   }
 
@@ -88,15 +79,13 @@ class ChunkAudioPlayerNode: AVAudioPlayerNode {
     let entry = ChunkEntry(
       id: id,
       buffer: buffer,
-      offset: totalSampleTime
+      offset: queueTimeline.reserve(frameCount: buffer.frameLength)
     )
 
     // Scheduled-ms upper bound + outstanding accounting, tagged with the current
     // generation so a later flush can disown this buffer's completion.
     let bufferMs = Double(entry.buffer.frameLength) / outputFormat.sampleRate * 1000.0
-    let scheduledGeneration = generation
-    scheduledMsAccum += bufferMs
-    outstandingBuffers += 1
+    let scheduledGeneration = accounting.schedule(bufferMs: bufferMs)
 
     queue.append(entry)
     listener?.onChunkQueued(id)
@@ -108,11 +97,11 @@ class ChunkAudioPlayerNode: AVAudioPlayerNode {
 
         // Count toward completion-driven rendered ms only if this buffer wasn't
         // flushed (its generation still current).
-        if scheduledGeneration == self.generation {
-          self.completionRenderedMs += bufferMs
-          self.outstandingBuffers = max(0, self.outstandingBuffers - 1)
-          if self.outstandingBuffers == 0 { self.lastPlaybackEndedAt = ProcessInfo.processInfo.systemUptime }
-        }
+        self.accounting.complete(
+          generation: scheduledGeneration,
+          bufferMs: bufferMs,
+          now: ProcessInfo.processInfo.systemUptime
+        )
 
         let chunkQueueCountBefore = self.queue.count
         self.queue.removeAll { $0.id == entry.id }
@@ -141,13 +130,12 @@ class ChunkAudioPlayerNode: AVAudioPlayerNode {
     foldRenderClock()
     // Disown any queued/flushed buffers so their completions never count as
     // rendered (flushed frames must NEVER be reported as played).
-    generation += 1
-    if outstandingBuffers > 0 { lastPlaybackEndedAt = ProcessInfo.processInfo.systemUptime }
-    outstandingBuffers = 0
+    accounting.discardOutstanding(now: ProcessInfo.processInfo.systemUptime)
 
     isChunkQueueStartedNeeded = true
     super.stop()
     converter.resetForDiscontinuity()
+    queueTimeline.resetAfterPlayerStop()
 
     // AVAudioPlayerNode.scheduleBuffer calls its played callback anyway, when
     // the audio has been stopped and the scheduled buffers are cleared. This
@@ -159,6 +147,26 @@ class ChunkAudioPlayerNode: AVAudioPlayerNode {
       let chunk = queue.removeFirst()
       listener?.onChunkPlayed(chunk.id)
     }
+  }
+
+  /// Repair completion accounting after the independent render clock proves
+  /// the snapshotted scheduled extent rendered out. This never calls `stop()`
+  /// and never touches the player's scheduled buffers.
+  func repairPlaybackAccounting(expectedScheduledMs: Int) -> PlaybackAccountingRepairOutcome {
+    let outcome = accounting.repairRenderedOut(
+      expectedScheduledMs: expectedScheduledMs,
+      now: ProcessInfo.processInfo.systemUptime
+    )
+    guard outcome == .repaired else { return outcome }
+
+    // The completion callbacks that normally retire these entries are the
+    // failed signal being repaired. Retire their Dart queue ownership without
+    // emitting `queueEnded`, whose listener intentionally stops the player.
+    let repairedEntries = queue
+    queue.removeAll()
+    isChunkQueueStartedNeeded = true
+    for entry in repairedEntries { listener?.onChunkPlayed(entry.id) }
+    return outcome
   }
 
   private func handleChunkPlayed(_ id: String) {

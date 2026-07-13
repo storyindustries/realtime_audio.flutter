@@ -1,3 +1,16 @@
+## 0.0.14
+
+* Preserve scheduled iOS/macOS playback across audio-engine configuration
+  changes. Benign notifications no longer restart a running engine; a genuine
+  system-driven stop rebuilds capture and restarts without stopping or resetting
+  the player queue.
+* Add `engineHealthStream` with typed configuration-change recovery outcomes.
+* Add generation-safe `repairPlaybackAccounting(expectedScheduledMs:)` for a
+  rendered-out stream whose completion callbacks died, without stopping the
+  player, plus explicit destructive `recoverWedgedPlayback()` for true wedges.
+* Fix Android `isRendering` after a flushed stream by comparing the current
+  playback-head segment with its own scheduled extent instead of lifetime totals.
+
 ## 0.0.13
 
 * Add a player **render clock** with three call-lifetime counters:

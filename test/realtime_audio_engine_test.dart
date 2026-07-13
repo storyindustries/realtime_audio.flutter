@@ -118,6 +118,48 @@ void main() {
       expect(unknownMechanism.mechanism, RealtimeAudioEchoCancellationMechanism.none);
       expect(unknownMechanism.trustsFullDuplex, false);
     });
+
+    test('RealtimeAudioEngineHealthEvent decodes structured recovery outcomes', () {
+      final event = RealtimeAudioEngineHealthEvent.fromMap(const {
+        'type': 'configuration_change_recovery_failed',
+        'engineWasRunning': false,
+        'queuedChunkCount': 3,
+        'message': 'audio input unavailable',
+      });
+
+      expect(event.type, RealtimeAudioEngineHealthEventType.configurationChangeRecoveryFailed);
+      expect(event.engineWasRunning, false);
+      expect(event.queuedChunkCount, 3);
+      expect(event.message, 'audio input unavailable');
+    });
+
+    test('playback recovery results decode typed reasons and clocks', () {
+      final repair = RealtimeAudioPlaybackAccountingRepair.fromMap(const {
+        'repaired': false,
+        'reason': 'scheduled_extent_changed',
+        'clock': {
+          'renderClockMs': 200,
+          'renderedMs': 0,
+          'scheduledMs': 280,
+          'isRendering': true,
+        },
+      });
+      final wedge = RealtimeAudioPlaybackWedgeRecovery.fromMap(const {
+        'recovered': false,
+        'message': 'engine restart failed',
+        'clock': {
+          'renderClockMs': 200,
+          'renderedMs': 0,
+          'scheduledMs': 280,
+          'isRendering': false,
+        },
+      });
+
+      expect(repair.reason, RealtimeAudioPlaybackAccountingRepairReason.scheduledExtentChanged);
+      expect(repair.clock.scheduledMs, 280);
+      expect(wedge.recovered, false);
+      expect(wedge.message, 'engine restart failed');
+    });
   });
 
   group('method channel round-trips', () {
@@ -226,6 +268,74 @@ void main() {
       expect(aec.mechanism, RealtimeAudioEchoCancellationMechanism.platformAec);
       expect(aec.captureProvenLive, true);
       expect(aec.trustsFullDuplex, true);
+    });
+
+    test('audioEngineHealth native callback is exposed as a typed stream', () async {
+      final eventFuture = audio.engineHealthStream.first;
+
+      await messenger.handlePlatformMessage(
+        engineChannel!.name,
+        const StandardMethodCodec().encodeMethodCall(
+          const MethodCall('audioEngineHealth', <String, dynamic>{
+            'type': 'configuration_change_recovered',
+            'engineWasRunning': false,
+            'queuedChunkCount': 2,
+          }),
+        ),
+        (_) {},
+      );
+
+      final event = await eventFuture;
+      expect(event.type, RealtimeAudioEngineHealthEventType.configurationChangeRecovered);
+      expect(event.queuedChunkCount, 2);
+    });
+
+    test('repairPlaybackAccounting sends the expected extent CAS', () async {
+      Object? sentArguments;
+      messenger.setMockMethodCallHandler(engineChannel!, (call) async {
+        if (call.method == 'repairPlaybackAccounting') {
+          sentArguments = call.arguments;
+          return <String, dynamic>{
+            'repaired': true,
+            'reason': 'repaired',
+            'clock': <String, dynamic>{
+              'renderClockMs': 4000,
+              'renderedMs': 0,
+              'scheduledMs': 4000,
+              'isRendering': false,
+            },
+          };
+        }
+        return null;
+      });
+
+      final result = await audio.repairPlaybackAccounting(expectedScheduledMs: 4000);
+
+      expect(sentArguments, <String, dynamic>{'expectedScheduledMs': 4000});
+      expect(result?.repaired, true);
+      expect(result?.clock.isRendering, false);
+    });
+
+    test('recoverWedgedPlayback exposes destructive recovery outcome', () async {
+      messenger.setMockMethodCallHandler(engineChannel!, (call) async {
+        if (call.method == 'recoverWedgedPlayback') {
+          return <String, dynamic>{
+            'recovered': true,
+            'clock': <String, dynamic>{
+              'renderClockMs': 1200,
+              'renderedMs': 1000,
+              'scheduledMs': 4000,
+              'isRendering': false,
+            },
+          };
+        }
+        return null;
+      });
+
+      final result = await audio.recoverWedgedPlayback();
+
+      expect(result?.recovered, true);
+      expect(result?.clock.renderClockMs, 1200);
     });
   });
 }
