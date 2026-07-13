@@ -431,6 +431,19 @@ class RealtimeAudio(
   override fun onChunkPlayed(id: String) = methodChannel.invokeMethod("chunkPlayed", id)
   override fun onChunkQueueStarted(id: String) = methodChannel.invokeMethod("chunkQueueStarted", id)
   override fun onChunkQueueEnded() = stopAudio()
+  override fun onPlaybackDrainError(message: String) {
+    mainLooperHandler.post {
+      methodChannel.invokeMethod(
+        "audioEngineHealth",
+        mapOf(
+          "type" to "playback_drain_signal_failed",
+          "engineWasRunning" to isRunning,
+          "queuedChunkCount" to audioTrack.queue.size,
+          "message" to message,
+        )
+      )
+    }
+  }
 
   //
 

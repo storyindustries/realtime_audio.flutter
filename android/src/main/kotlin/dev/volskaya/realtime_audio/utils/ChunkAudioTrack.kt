@@ -3,8 +3,11 @@ package dev.volskaya.realtime_audio.utils
 import android.media.AudioAttributes
 import android.media.AudioFormat
 import android.media.AudioTrack
+import android.media.AudioTrack.OnPlaybackPositionUpdateListener
 import android.os.Handler
 import android.os.Looper
+import android.util.Log
+import dev.volskaya.realtime_audio.PlaybackDrainLedger
 import dev.volskaya.realtime_audio.QueuedChunk
 import dev.volskaya.realtime_audio.RenderClock
 import dev.volskaya.realtime_audio.getBitRatio
@@ -24,14 +27,25 @@ class ChunkAudioTrack(
   bufferSizeInBytes,
   mode,
   sessionId
-) {
+), OnPlaybackPositionUpdateListener {
+  private data class WriteCursor(
+    val chunk: QueuedChunk,
+    var byteOffset: Int = 0,
+  )
+
+  private val lock = Any()
   private var thread: Thread? = null
+  private var writesEnabled = false
   private val mainLooperHandler = Handler(Looper.getMainLooper())
   private val eventListener = WeakReference(chunkAudioEventListener)
   private var isChunkQueueStartedNeeded = true
+  private val chunks = mutableListOf<QueuedChunk>()
+  private val pendingWrites = ArrayDeque<WriteCursor>()
+  private val drainLedger = PlaybackDrainLedger()
+  private var segmentDataSize = 0
 
-  val queue: MutableList<QueuedChunk> = mutableListOf()
-  val totalDataSize: Int get() = queue.lastOrNull()?.let { it.offset + it.data.size } ?: 0
+  val queue: List<QueuedChunk> get() = synchronized(lock) { chunks.toList() }
+  val totalDataSize: Int get() = synchronized(lock) { segmentDataSize }
   val totalSampleTime: Int get() = totalDataSize / bitRatio
 
   val bitRatio: Int get() = format.getBitRatio()
@@ -59,6 +73,10 @@ class ChunkAudioTrack(
   private var scheduledMsAccum = 0.0
   private var segmentScheduledMs = 0.0
   private var lastPlaybackEndedAtNs: Long? = null
+
+  init {
+    setPlaybackPositionUpdateListener(this, mainLooperHandler)
+  }
 
   /// Wrap-safe playback-head position in frames (see [RenderClock.renderedFrames]).
   val renderedFramesNow: Long get() = RenderClock.renderedFrames(playbackHeadPosition)
@@ -97,108 +115,168 @@ class ChunkAudioTrack(
   fun queue(id: String, data: ByteArray) {
     if (data.isEmpty()) return
 
-    val queuedChunkEntry = QueuedChunk(
-      id = id,
-      data = data,
-      offset = totalDataSize,
-    )
-
-    // Scheduled-ms upper bound: bytes -> frames -> ms at the output rate.
-    scheduledMsAccum += RenderClock.framesToMs((data.size / bitRatio).toLong(), sampleRate)
-    segmentScheduledMs += RenderClock.framesToMs((data.size / bitRatio).toLong(), sampleRate)
-
-    queue.add(queuedChunkEntry)
+    synchronized(lock) {
+      val queuedChunkEntry = QueuedChunk(
+        id = id,
+        data = data,
+        offset = segmentDataSize,
+      )
+      val frameCount = data.size / bitRatio
+      segmentDataSize += data.size
+      scheduledMsAccum += RenderClock.framesToMs(frameCount.toLong(), sampleRate)
+      segmentScheduledMs += RenderClock.framesToMs(frameCount.toLong(), sampleRate)
+      chunks.add(queuedChunkEntry)
+      pendingWrites.addLast(WriteCursor(queuedChunkEntry))
+      drainLedger.enqueue(id, frameCount)
+    }
     eventListener.get()?.onChunkQueued(id)
+    startWriterIfNeeded()
   }
 
   override fun play() {
-    if (isChunkQueueStartedNeeded && queue.isNotEmpty()) {
-      queue.firstOrNull()?.let {
-        isChunkQueueStartedNeeded = false
-        eventListener.get()?.onChunkQueueStarted(it.id)
-      }
-    }
-
-    isPlaybackActive = true
-    super.play()
-    thread = thread ?: Thread {
-      val currentThread = Thread.currentThread()
-      var resumeOffset: Int? = dataPlaybackHeadPosition - (queue.firstOrNull()?.offset ?: 0)
-
-      while (thread == currentThread && !currentThread.isInterrupted && queue.isNotEmpty()) {
-        val chunk = queue.first()
-        val data = runCatching {
-          val pauseOffset = resumeOffset?.also { resumeOffset = null } ?: 0
-          return@runCatching if (pauseOffset > 0) chunk.data.copyOfRange(
-            pauseOffset,
-            chunk.data.size
-          ) else chunk.data
-        }.getOrNull() ?: chunk.data
-
-        write(data, 0, data.size)
-
-        if (thread != currentThread || currentThread.isInterrupted) break
-
-        val didRemove = queue.remove(chunk)
-        if (didRemove) {
-          handleChunkPlayed(chunk.id)
+    synchronized(lock) {
+      if (isChunkQueueStartedNeeded && chunks.isNotEmpty()) {
+        chunks.firstOrNull()?.let {
+          isChunkQueueStartedNeeded = false
+          eventListener.get()?.onChunkQueueStarted(it.id)
         }
       }
+      isPlaybackActive = true
+      writesEnabled = true
+    }
+    super.play()
+    startWriterIfNeeded()
+  }
 
-      if (currentThread == thread && !currentThread.isInterrupted && queue.isEmpty()) {
-        handleQueueEnded()
+  private fun startWriterIfNeeded() {
+    val writer = synchronized(lock) {
+      if (!writesEnabled || pendingWrites.isEmpty() || thread?.isAlive == true) return
+      Thread(::writePendingChunks, "realtime-audio-writer").also { thread = it }
+    }
+    writer.start()
+  }
+
+  private fun writePendingChunks() {
+    val currentThread = Thread.currentThread()
+    var writeFailed = false
+    try {
+      while (!currentThread.isInterrupted) {
+        val cursor = synchronized(lock) {
+          if (thread !== currentThread || !writesEnabled) return
+          pendingWrites.firstOrNull() ?: return
+        }
+        val remaining = cursor.chunk.data.size - cursor.byteOffset
+        val written = write(cursor.chunk.data, cursor.byteOffset, remaining, WRITE_BLOCKING)
+        if (written <= 0) {
+          writeFailed = true
+          eventListener.get()?.onPlaybackDrainError("AudioTrack.write failed with code $written")
+          return
+        }
+
+        val chunkFinishedWriting = synchronized(lock) {
+          if (thread !== currentThread) return
+          cursor.byteOffset += written
+          if (cursor.byteOffset < cursor.chunk.data.size) return@synchronized false
+          pendingWrites.removeFirst()
+          drainLedger.markWritten(cursor.chunk.id)
+          true
+        }
+        if (chunkFinishedWriting) mainLooperHandler.post(::reconcilePlaybackHead)
       }
-    }.also { it.start() }
-  }
-
-  private fun handleChunkPlayed(id: String) {
-    mainLooperHandler.post {
-      eventListener.get()?.onChunkPlayed(id)
+    } finally {
+      val restart = synchronized(lock) {
+        if (thread !== currentThread) return@synchronized false
+        thread = null
+        !writeFailed && writesEnabled && pendingWrites.isNotEmpty()
+      }
+      if (restart) startWriterIfNeeded()
     }
   }
 
-  private fun handleQueueEnded() {
-    thread?.interrupt()
-    thread = null
-    mainLooperHandler.post {
-      eventListener.get()?.onChunkQueueEnded()
+  private fun armPlaybackMarker(frame: Long) {
+    val result = setNotificationMarkerPosition(frame.toInt())
+    if (result != SUCCESS) {
+      val message = "AudioTrack marker setup failed with code $result at frame $frame"
+      Log.e("RealtimeAudio", message)
+      eventListener.get()?.onPlaybackDrainError(message)
     }
+  }
+
+  override fun onMarkerReached(track: AudioTrack?) {
+    if (track !== this) return
+    reconcilePlaybackHead()
+  }
+
+  private fun reconcilePlaybackHead() {
+    val advance = synchronized(lock) {
+      val result = drainLedger.advancePlaybackHead(renderedFramesNow)
+      if (result.playedChunkIds.isNotEmpty()) {
+        val played = result.playedChunkIds.toSet()
+        chunks.removeAll { it.id in played }
+      }
+      result
+    }
+
+    advance.playedChunkIds.forEach(::handleChunkPlayed)
+    advance.nextMarkerFrame?.let(::armPlaybackMarker)
+    if (advance.drained) handleQueueEnded()
+  }
+
+  override fun onPeriodicNotification(track: AudioTrack?) {
+    // Exact chunk-end markers own drain; no elapsed-time approximation.
   }
 
   override fun pause() {
-    thread?.interrupt()
-    thread = null
+    synchronized(lock) {
+      writesEnabled = false
+      thread?.interrupt()
+    }
     super.pause()
   }
 
   override fun stop() {
-    // Fold the live segment into the base BEFORE super.stop()/flush() reset the
-    // playback head, so the lifetime render clock stays monotonic across the stop.
     foldRenderClock()
     if (isPlaybackActive) lastPlaybackEndedAtNs = System.nanoTime()
     isPlaybackActive = false
 
-    thread?.interrupt()
-    thread = null
-    isChunkQueueStartedNeeded = true
+    val discarded = synchronized(lock) {
+      writesEnabled = false
+      thread?.interrupt()
+      thread = null
+      isChunkQueueStartedNeeded = true
+      val values = chunks.toList()
+      chunks.clear()
+      pendingWrites.clear()
+      drainLedger.reset()
+      segmentDataSize = 0
+      values
+    }
     super.stop()
     segmentScheduledMs = 0.0
 
-    while (queue.isNotEmpty()) {
-      queue.removeAt(0).let { eventListener.get()?.onChunkPlayed(it.id) }
-    }
+    discarded.forEach { eventListener.get()?.onChunkPlayed(it.id) }
   }
 
-  private companion object {
-    /// Post-drain hangover: keep reporting "rendering" briefly after the last
-    /// buffer drains, covering speaker ring-out / output pipeline latency.
-    private const val RENDER_HANGOVER_NS = 200_000_000L
+  private fun handleChunkPlayed(id: String) {
+    // Marker callbacks are delivered on [mainLooperHandler], so retire Dart
+    // ownership synchronously before the terminal drain transition.
+    eventListener.get()?.onChunkPlayed(id)
+  }
+
+  private fun handleQueueEnded() {
+    synchronized(lock) {
+      thread?.interrupt()
+      thread = null
+    }
+    // Synchronous on the marker callback's main looper: a later server chunk
+    // starts a fresh player segment instead of racing a deferred stale drain.
+    eventListener.get()?.onChunkQueueEnded()
   }
 
   fun getCurrentChunkProps(): Map<String, Any>? {
     val sampleTime = playbackHeadPosition
     val sampleTimeTotal = totalSampleTime
-    val chunk = queue.firstOrNull() ?: return null
+    val chunk = synchronized(lock) { chunks.firstOrNull() } ?: return null
     val offset = chunk.offset / bitRatio
     val chunkSampleTime = sampleTime - offset
     val chunkSampleTimeTotal = chunk.data.size / bitRatio
@@ -212,4 +290,11 @@ class ChunkAudioTrack(
       "chunkSampleTimeTotal" to chunkSampleTimeTotal,
     )
   }
+
+  private companion object {
+    /// Post-drain hangover: keep reporting "rendering" briefly after the last
+    /// buffer drains, covering speaker ring-out / output pipeline latency.
+    private const val RENDER_HANGOVER_NS = 200_000_000L
+  }
+
 }

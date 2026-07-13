@@ -10,6 +10,9 @@
   player, plus explicit destructive `recoverWedgedPlayback()` for true wedges.
 * Fix Android `isRendering` after a flushed stream by comparing the current
   playback-head segment with its own scheduled extent instead of lifetime totals.
+* Android chunk completion and natural drain now follow exact `AudioTrack`
+  playback-head markers. `write()` buffer acceptance no longer stops and flushes
+  PCM that the device has not rendered yet; partial writes survive pause/resume.
 
 ## 0.0.13
 

@@ -131,6 +131,13 @@ void main() {
       expect(event.engineWasRunning, false);
       expect(event.queuedChunkCount, 3);
       expect(event.message, 'audio input unavailable');
+
+      final drainFailure = RealtimeAudioEngineHealthEvent.fromMap(const {
+        'type': 'playback_drain_signal_failed',
+        'engineWasRunning': true,
+        'queuedChunkCount': 1,
+      });
+      expect(drainFailure.type, RealtimeAudioEngineHealthEventType.playbackDrainSignalFailed);
     });
 
     test('playback recovery results decode typed reasons and clocks', () {
