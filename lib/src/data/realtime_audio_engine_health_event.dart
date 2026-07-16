@@ -4,15 +4,20 @@ enum RealtimeAudioEngineHealthEventType {
   configurationChangeRecovered,
   configurationChangeRecoveryFailed,
   playbackDrainSignalFailed,
+  playbackQueueDrained,
   unknown;
 
   static RealtimeAudioEngineHealthEventType fromWire(String value) {
     return switch (value) {
-      'configuration_change_ignored_healthy' => configurationChangeIgnoredHealthy,
-      'configuration_change_recovery_started' => configurationChangeRecoveryStarted,
+      'configuration_change_ignored_healthy' =>
+        configurationChangeIgnoredHealthy,
+      'configuration_change_recovery_started' =>
+        configurationChangeRecoveryStarted,
       'configuration_change_recovered' => configurationChangeRecovered,
-      'configuration_change_recovery_failed' => configurationChangeRecoveryFailed,
+      'configuration_change_recovery_failed' =>
+        configurationChangeRecoveryFailed,
       'playback_drain_signal_failed' => playbackDrainSignalFailed,
+      'playback_queue_drained' => playbackQueueDrained,
       _ => unknown,
     };
   }
@@ -29,6 +34,8 @@ class RealtimeAudioEngineHealthEvent {
     required this.engineWasRunning,
     required this.queuedChunkCount,
     this.message,
+    this.outputRoute,
+    this.outputSampleRate,
   });
 
   factory RealtimeAudioEngineHealthEvent.fromMap(Map<String, dynamic> map) {
@@ -39,6 +46,8 @@ class RealtimeAudioEngineHealthEvent {
       engineWasRunning: map['engineWasRunning'] as bool? ?? false,
       queuedChunkCount: map['queuedChunkCount'] as int? ?? 0,
       message: map['message'] as String?,
+      outputRoute: map['outputRoute'] as String?,
+      outputSampleRate: map['outputSampleRate'] as int?,
     );
   }
 
@@ -46,4 +55,8 @@ class RealtimeAudioEngineHealthEvent {
   final bool engineWasRunning;
   final int queuedChunkCount;
   final String? message;
+
+  /// Coarse route class only; never a device name or identifier.
+  final String? outputRoute;
+  final int? outputSampleRate;
 }

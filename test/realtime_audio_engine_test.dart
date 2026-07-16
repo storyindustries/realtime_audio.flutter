@@ -138,6 +138,17 @@ void main() {
         'queuedChunkCount': 1,
       });
       expect(drainFailure.type, RealtimeAudioEngineHealthEventType.playbackDrainSignalFailed);
+
+      final drained = RealtimeAudioEngineHealthEvent.fromMap(const {
+        'type': 'playback_queue_drained',
+        'engineWasRunning': true,
+        'queuedChunkCount': 0,
+        'outputRoute': 'bluetooth',
+        'outputSampleRate': 48_000,
+      });
+      expect(drained.type, RealtimeAudioEngineHealthEventType.playbackQueueDrained);
+      expect(drained.outputRoute, 'bluetooth');
+      expect(drained.outputSampleRate, 48_000);
     });
 
     test('playback recovery results decode typed reasons and clocks', () {

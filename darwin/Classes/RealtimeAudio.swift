@@ -111,7 +111,9 @@ class RealtimeAudio: NSObject {
       }
     #endif
 
-    // The route's sample rate is authoritative only after activation.
+    // The route's sample rate is only authoritative after activation. Creating
+    // the resampling nodes before this point can lock them to the stale idle
+    // route rate and introduce a second conversion boundary on call start.
     try audioSession.configure(recorderEnabled: isRecorderEnabled)
     try audioSession.activate()
     try createPlayerNodesForCurrentRoute()
@@ -124,6 +126,22 @@ class RealtimeAudio: NSObject {
 
     try installTap()
     audioEngine.prepare()
+  }
+
+  private func createPlayerNodesForCurrentRoute() throws {
+    let routeSampleRate = audioSession.sampleRate ?? playerSampleRate
+    guard let outputFormat = getAudioFormat(.pcmFormatFloat32, routeSampleRate, 1) else {
+      throw TextError("Failed to create player output format.")
+    }
+
+    playerOutputFormat = outputFormat
+    audioPlayerNode = try ChunkAudioPlayerNode(
+      inputFormat: playerInputFormat,
+      outputFormat: outputFormat
+    )
+    audioBackgroundNode = arguments.backgroundEnabled
+      ? try LoopAudioPlayerNode(inputFormat: playerInputFormat, outputFormat: outputFormat)
+      : nil
   }
 
   #if os(iOS)
@@ -226,7 +244,7 @@ class RealtimeAudio: NSObject {
           notifyEngineHealth(
             type: "configuration_change_recovery_failed",
             engineWasRunning: engineWasRunning,
-            message: error.localizedDescription
+            message: "recovery_failed"
           )
         }
       }
@@ -236,7 +254,9 @@ class RealtimeAudio: NSObject {
   private func notifyEngineHealth(
     type: String,
     engineWasRunning: Bool,
-    message: String? = nil
+    message: String? = nil,
+    outputRoute: String? = nil,
+    outputSampleRate: Int? = nil
   ) {
     var event: [String: Any] = [
       "type": type,
@@ -244,6 +264,8 @@ class RealtimeAudio: NSObject {
       "queuedChunkCount": audioPlayerNode.queue.count,
     ]
     if let message { event["message"] = message }
+    if let outputRoute { event["outputRoute"] = outputRoute }
+    if let outputSampleRate { event["outputSampleRate"] = outputSampleRate }
     methodChannel.invokeMethod("audioEngineHealth", arguments: event)
   }
 
@@ -642,7 +664,15 @@ extension RealtimeAudio: ChunkAudioEventListener {
   func onChunkQueued(_ id: String) { methodChannel.invokeMethod("chunkQueued", arguments: id) }
   func onChunkPlayed(_ id: String) { methodChannel.invokeMethod("chunkPlayed", arguments: id) }
   func onChunkQueueStarted(_ id: String) { methodChannel.invokeMethod("chunkQueueStarted", arguments: id) }
-  func onChunkQueueEnded() { stopAudio() }
+  func onChunkQueueEnded() {
+    notifyEngineHealth(
+      type: "playback_queue_drained",
+      engineWasRunning: audioEngine.isRunning,
+      outputRoute: audioSession.outputRouteClass,
+      outputSampleRate: Int((audioSession.sampleRate ?? playerSampleRate).rounded())
+    )
+    stopAudio()
+  }
 
   private func queueAudio(_ id: String, _ data: [UInt8]) throws {
     if data.isEmpty { return }
