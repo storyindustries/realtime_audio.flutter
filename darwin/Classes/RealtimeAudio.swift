@@ -58,18 +58,6 @@ class RealtimeAudio: NSObject {
   private var _recorderEnabledOverride: Bool?
   var isRecorderEnabled: Bool { _recorderEnabledOverride ?? arguments.recorderEnabled }
 
-  private func createPlayerNodesForCurrentRoute() throws {
-    let routeSampleRate = audioSession.sampleRate ?? playerSampleRate
-    guard let outputFormat = getAudioFormat(.pcmFormatFloat32, routeSampleRate, 1) else {
-      throw TextError("Failed to create player output format.")
-    }
-    playerOutputFormat = outputFormat
-    audioPlayerNode = try ChunkAudioPlayerNode(inputFormat: playerInputFormat, outputFormat: outputFormat)
-    audioBackgroundNode = arguments.backgroundEnabled
-      ? try LoopAudioPlayerNode(inputFormat: playerInputFormat, outputFormat: outputFormat)
-      : nil
-  }
-
   #if os(iOS)
     /// WebRTC Audio Processing Module for software echo cancellation, noise
     /// suppression, and AGC. Used instead of Apple's voice processing when
