@@ -4,7 +4,7 @@ class LoopAudioPlayerNode: AVAudioPlayerNode {
   private var inputFormat: AVAudioFormat
   private var outputFormat: AVAudioFormat
 
-  private var converter: AVAudioConverter? = nil
+  private let converter: PCMStreamConverter
 
   private var loopingId: String? = nil
   private var loopingData: [UInt8]? = nil
@@ -15,18 +15,10 @@ class LoopAudioPlayerNode: AVAudioPlayerNode {
   init(
     inputFormat: AVAudioFormat,
     outputFormat: AVAudioFormat
-  ) {
+  ) throws {
     self.inputFormat = inputFormat
     self.outputFormat = outputFormat
-  }
-
-  private func getPlayerConverter(_ from: AVAudioFormat, _ to: AVAudioFormat) throws -> AVAudioConverter {
-    if let converter { return converter }
-    guard let newConverter = AVAudioConverter(from: from, to: to) else {
-      throw TextError("Failed to create an AVAudioConverter.")
-    }
-    converter = newConverter
-    return newConverter
+    self.converter = try PCMStreamConverter(inputFormat: inputFormat, outputFormat: outputFormat)
   }
   
   func queue(_ id: String, _ data: [UInt8], loop: Bool = false) throws {
@@ -34,7 +26,6 @@ class LoopAudioPlayerNode: AVAudioPlayerNode {
     
     if data.isEmpty { return }
     
-    let converter = try getPlayerConverter(inputFormat, outputFormat)
     let buffer = try converter.convert(data)
 
     loopingId = id
@@ -57,36 +48,6 @@ class LoopAudioPlayerNode: AVAudioPlayerNode {
       loopingData = nil
     }
     super.stop()
-  }
-}
-
-extension AVAudioConverter {
-  fileprivate func convert(_ data: [UInt8]) throws -> AVAudioPCMBuffer {
-    let frameLength = UInt32(data.count) / inputFormat.streamDescription.pointee.mBytesPerFrame
-    let buffer = AVAudioPCMBuffer(pcmFormat: inputFormat, frameCapacity: frameLength)!
-    buffer.frameLength = frameLength
-
-    let dstLeft = buffer.int16ChannelData![0]
-    data.withUnsafeBufferPointer {
-      let src = UnsafeRawPointer($0.baseAddress!).bindMemory(to: Int16.self, capacity: Int(frameLength))
-      dstLeft.initialize(from: src, count: Int(frameLength))
-    }
-
-    let ratio: Float = Float(inputFormat.sampleRate) / Float(outputFormat.sampleRate)
-    let frameCapacity: Float = Float(buffer.frameCapacity) / ratio
-    let bufferConverted = AVAudioPCMBuffer(pcmFormat: outputFormat, frameCapacity: UInt32(frameCapacity))!
-
-    var error: NSError? = nil
-    convert(to: bufferConverted, error: &error) { inNumPackets, outStatus in
-      outStatus.pointee = .haveData
-      return buffer
-    }
-    reset()
-
-    if let error {
-      throw TextError(error.localizedDescription)
-    }
-
-    return bufferConverted
+    converter.resetForDiscontinuity()
   }
 }

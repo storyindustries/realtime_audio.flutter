@@ -12,7 +12,6 @@ struct ChunkEntry {
   var buffer: AVAudioPCMBuffer
   var offset: UInt32
 }
-
 class RealtimeAudio: NSObject {
   let id: String
   let arguments: CreateArguments
@@ -29,13 +28,13 @@ class RealtimeAudio: NSObject {
 
   private let playerSampleRate: Double
   private let playerInputFormat: AVAudioFormat
-  private let playerOutputFormat: AVAudioFormat
+  private var playerOutputFormat: AVAudioFormat!
 
   private let audioSession = RealtimeAudioSession()
   private let audioEngine = AVAudioEngine()
   private let audioMixerNode = AVAudioMixerNode()
-  private let audioPlayerNode: ChunkAudioPlayerNode
-  private let audioBackgroundNode: LoopAudioPlayerNode?
+  private var audioPlayerNode: ChunkAudioPlayerNode!
+  private var audioBackgroundNode: LoopAudioPlayerNode?
 
   private var playerVolumeTimer: Timer?
   private var playerProgressTimer: Timer?
@@ -51,6 +50,18 @@ class RealtimeAudio: NSObject {
   /// disposing the engine. `nil` means use `arguments.recorderEnabled`.
   private var _recorderEnabledOverride: Bool?
   var isRecorderEnabled: Bool { _recorderEnabledOverride ?? arguments.recorderEnabled }
+
+  private func createPlayerNodesForCurrentRoute() throws {
+    let routeSampleRate = audioSession.sampleRate ?? playerSampleRate
+    guard let outputFormat = getAudioFormat(.pcmFormatFloat32, routeSampleRate, 1) else {
+      throw TextError("Failed to create player output format.")
+    }
+    playerOutputFormat = outputFormat
+    audioPlayerNode = try ChunkAudioPlayerNode(inputFormat: playerInputFormat, outputFormat: outputFormat)
+    audioBackgroundNode = arguments.backgroundEnabled
+      ? try LoopAudioPlayerNode(inputFormat: playerInputFormat, outputFormat: outputFormat)
+      : nil
+  }
 
   #if os(iOS)
     /// WebRTC Audio Processing Module for software echo cancellation, noise
@@ -79,20 +90,6 @@ class RealtimeAudio: NSObject {
 
     self.playerSampleRate = arguments.playerSampleRate
     self.playerInputFormat = getAudioFormat(.pcmFormatInt16, playerSampleRate, 1)!
-    self.playerOutputFormat = getAudioFormat(.pcmFormatFloat32, audioSession.sampleRate ?? playerSampleRate, 1)!
-
-    self.audioPlayerNode = ChunkAudioPlayerNode(
-      inputFormat: self.playerInputFormat,
-      outputFormat: self.playerOutputFormat
-    )
-
-    self.audioBackgroundNode =
-      !arguments.backgroundEnabled
-      ? nil
-      : LoopAudioPlayerNode(
-        inputFormat: self.playerInputFormat,
-        outputFormat: self.playerOutputFormat
-      )
 
     super.init()
 
@@ -106,13 +103,14 @@ class RealtimeAudio: NSObject {
       }
     #endif
 
+    // The route's sample rate is authoritative only after activation.
+    try audioSession.configure(recorderEnabled: isRecorderEnabled)
+    try audioSession.activate()
+    try createPlayerNodesForCurrentRoute()
     attachObservers()
     audioPlayerNode.setListener(self)
     methodChannel.setMethodCallHandler(handleFlutterMethod)
-
-    try audioSession.configure(recorderEnabled: isRecorderEnabled)
     try attachNodes()
-    try audioSession.activate()
 
     changeVolume()
 

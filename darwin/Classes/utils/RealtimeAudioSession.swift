@@ -13,6 +13,24 @@ class RealtimeAudioSession {
     #endif
   }
 
+  /// Coarse hardware route only. It is safe for operational telemetry and
+  /// deliberately excludes device names and identifiers.
+  var outputRouteClass: String {
+    #if os(iOS)
+      guard let output = instance.currentRoute.outputs.first else { return "unknown" }
+      switch output.portType {
+      case .builtInSpeaker: return "speaker"
+      case .builtInReceiver: return "receiver"
+      case .headphones, .headsetMic, .lineOut, .usbAudio: return "wired"
+      case .bluetoothA2DP, .bluetoothHFP, .bluetoothLE: return "bluetooth"
+      case .airPlay: return "airplay"
+      default: return "other"
+      }
+    #else
+      return "unknown"
+    #endif
+  }
+
   func configure(recorderEnabled: Bool) throws {
     #if os(iOS)
       if !recorderEnabled {
@@ -20,7 +38,7 @@ class RealtimeAudioSession {
         try instance.setPreferredInputOrientation(.portrait)
       } else {
         try instance.setCategory(
-          .playAndRecord, mode: .voiceChat, options: [.defaultToSpeaker, .allowBluetooth, .duckOthers])
+          .playAndRecord, mode: .voiceChat, options: [.defaultToSpeaker, .allowBluetoothHFP, .duckOthers])
         try instance.setPreferredInputOrientation(.portrait)
         try instance.setAllowHapticsAndSystemSoundsDuringRecording(false)
         if #available(iOS 18.2, *) {

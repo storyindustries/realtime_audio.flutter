@@ -8,30 +8,21 @@ class ChunkAudioPlayerNode: AVAudioPlayerNode {
   var totalSampleTime: UInt32 { (queue.last?.offset ?? 0) + (queue.last?.buffer.frameLength ?? 0) }
 
   private var isChunkQueueStartedNeeded = true
-  private var converter: AVAudioConverter? = nil
+  private let converter: PCMStreamConverter
   private weak var listener: ChunkAudioEventListener? = nil
 
   init(
     inputFormat: AVAudioFormat,
     outputFormat: AVAudioFormat
-  ) {
+  ) throws {
     self.inputFormat = inputFormat
     self.outputFormat = outputFormat
-  }
-
-  private func getPlayerConverter(_ from: AVAudioFormat, _ to: AVAudioFormat) throws -> AVAudioConverter {
-    if let converter { return converter }
-    guard let newConverter = AVAudioConverter(from: from, to: to) else {
-      throw TextError("Failed to create an AVAudioConverter.")
-    }
-    converter = newConverter
-    return newConverter
+    self.converter = try PCMStreamConverter(inputFormat: inputFormat, outputFormat: outputFormat)
   }
 
   func queue(_ id: String, _ data: [UInt8]) throws {
     if data.isEmpty { return }
 
-    let converter = try getPlayerConverter(inputFormat, outputFormat)
     let buffer = try converter.convert(data)
     let entry = ChunkEntry(
       id: id,
@@ -69,6 +60,7 @@ class ChunkAudioPlayerNode: AVAudioPlayerNode {
   override func stop() {
     isChunkQueueStartedNeeded = true
     super.stop()
+    converter.resetForDiscontinuity()
 
     // AVAudioPlayerNode.scheduleBuffer calls its played callback anyway, when
     // the audio has been stopped and the scheduled buffers are cleared. This
@@ -119,36 +111,5 @@ class ChunkAudioPlayerNode: AVAudioPlayerNode {
       "chunkSampleTime": chunkSampleTime,
       "chunkSampleTimeTotal": chunk.buffer.frameLength,
     ]
-  }
-}
-
-extension AVAudioConverter {
-  fileprivate func convert(_ data: [UInt8]) throws -> AVAudioPCMBuffer {
-    let frameLength = UInt32(data.count) / inputFormat.streamDescription.pointee.mBytesPerFrame
-    let buffer = AVAudioPCMBuffer(pcmFormat: inputFormat, frameCapacity: frameLength)!
-    buffer.frameLength = frameLength
-
-    let dstLeft = buffer.int16ChannelData![0]
-    data.withUnsafeBufferPointer {
-      let src = UnsafeRawPointer($0.baseAddress!).bindMemory(to: Int16.self, capacity: Int(frameLength))
-      dstLeft.initialize(from: src, count: Int(frameLength))
-    }
-
-    let ratio: Float = Float(inputFormat.sampleRate) / Float(outputFormat.sampleRate)
-    let frameCapacity: Float = Float(buffer.frameCapacity) / ratio
-    let bufferConverted = AVAudioPCMBuffer(pcmFormat: outputFormat, frameCapacity: UInt32(frameCapacity))!
-
-    var error: NSError? = nil
-    convert(to: bufferConverted, error: &error) { inNumPackets, outStatus in
-      outStatus.pointee = .haveData
-      return buffer
-    }
-    reset()
-
-    if let error {
-      throw TextError(error.localizedDescription)
-    }
-
-    return bufferConverted
   }
 }
