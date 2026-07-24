@@ -67,15 +67,30 @@ List<double> pcm16ToDoubles(Uint8List bytes) {
 List<double> downsample2x(List<double> input) =>
     List<double>.generate(input.length ~/ 2, (i) => (input[2 * i] + input[2 * i + 1]) / 2.0);
 
+/// Root-mean-square of [samples] — the capture-liveness floor (a muted/denied
+/// mic delivering all-zero frames must FAIL the gate, not trivially pass it).
+double rms(List<double> samples) {
+  if (samples.isEmpty) return 0;
+  double sum = 0;
+  for (final double s in samples) {
+    sum += s * s;
+  }
+  return math.sqrt(sum / samples.length);
+}
+
 /// Max normalized cross-correlation of [reference] against [capture] over
 /// candidate delays [0, maxLagMs], both at [sampleRate]. Window-normalized so
-/// the score is amplitude-invariant (acoustic coupling loss doesn't hide echo).
+/// the score is amplitude-invariant (acoustic coupling loss doesn't hide
+/// echo). The lag range must span playback-START offset + acoustic delay —
+/// capture begins at `start()` while the reference is queued afterwards, so
+/// the echo can land well over a second into the capture (rev-contract D2);
+/// callers scan the whole capture.
 double maxNormalizedCorrelation({
   required List<double> reference,
   required List<double> capture,
   required int sampleRate,
-  int maxLagMs = 600,
-  int lagStepMs = 5,
+  required int maxLagMs,
+  int lagStepMs = 10,
 }) {
   final int window = math.min(reference.length, sampleRate * 2);
   double refEnergy = 0;
@@ -154,10 +169,32 @@ void main() {
     );
     expect(capture48.length, greaterThan(recorderSampleRate * 3), reason: 'capture starved');
 
+    // Liveness floor (rev-contract D1): an all-zero/near-silent capture means
+    // the mic never heard the speaker — the gate would otherwise false-pass
+    // with zero proof, the exact trap it exists to catch. −60 dBFS floor.
+    expect(
+      postState?.captureProvenLive,
+      isTrue,
+      reason: 'capture path never proved live — nothing was measured',
+    );
+    final double captureRms = rms(capture48);
+    // ignore: avoid_print
+    print('capture RMS: ${captureRms.toStringAsFixed(5)}');
+    expect(
+      captureRms,
+      greaterThan(0.001),
+      reason: 'capture is silent (muted/denied mic?) — the gate measured nothing',
+    );
+
+    final List<double> capture24 = downsample2x(capture48);
+    final int windowSamples = math.min(playerSampleRate * 2, pcm16ToDoubles(reference).length);
     final double correlation = maxNormalizedCorrelation(
       reference: pcm16ToDoubles(reference),
-      capture: downsample2x(capture48),
+      capture: capture24,
       sampleRate: playerSampleRate,
+      // Scan the WHOLE capture: playback starts an unbounded settle after
+      // capture[0] (queue loop, buffer prime, route settle).
+      maxLagMs: math.max(0, ((capture24.length - windowSamples) * 1000) ~/ playerSampleRate),
     );
     // ignore: avoid_print
     print('speaker→mic correlation: ${correlation.toStringAsFixed(3)}');

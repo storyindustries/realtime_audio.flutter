@@ -104,3 +104,35 @@ object EchoPathPolicy {
     )
   }
 }
+
+/**
+ * Pure builder of the `getEchoCancellationState` read-back map — the contract
+ * every consumer's duplex trust rides on. `platform_aec` is claimed ONLY for
+ * an actually attached hardware canceller (never the bare capture source, the
+ * pre-0.0.16 ghost), `webrtc_apm` only for a live APM, with ERLE + mode as
+ * the evidence channel. Unit-tested (EchoStateReadbackTest).
+ */
+object EchoStateReadback {
+  fun build(
+    requested: Boolean,
+    captureProvenLive: Boolean,
+    hardwareAecAttached: Boolean,
+    apmLive: Boolean,
+    apmMobileAec: Boolean,
+    erleDb: Double?,
+  ): Map<String, Any?> {
+    val mechanism = when {
+      hardwareAecAttached -> EchoMechanism.PLATFORM_AEC
+      apmLive -> EchoMechanism.WEBRTC_APM
+      else -> EchoMechanism.NONE
+    }
+    return mapOf(
+      "requested" to requested,
+      "nativeEnabled" to (hardwareAecAttached || apmLive),
+      "mechanism" to mechanism.wire,
+      "captureProvenLive" to captureProvenLive,
+      "erleDb" to erleDb,
+      "apmMode" to if (apmLive) (if (apmMobileAec) "aecm" else "aec3") else null,
+    )
+  }
+}

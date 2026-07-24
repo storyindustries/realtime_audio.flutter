@@ -174,6 +174,26 @@ void main() {
       expect(converged.apmMode, 'aec3');
       expect(converged.trustsFullDuplex, true);
 
+      // Pin the boundary itself: the threshold is inclusive (≥), and a value
+      // epsilon below must not trust — a >=→> regression stays visible.
+      final atThreshold = decode(const {
+        'requested': true,
+        'nativeEnabled': true,
+        'mechanism': 'webrtc_apm',
+        'captureProvenLive': true,
+        'erleDb': RealtimeAudioEchoCancellationState.erleTrustThresholdDb,
+      });
+      expect(atThreshold.trustsFullDuplex, true);
+
+      final justBelow = decode(const {
+        'requested': true,
+        'nativeEnabled': true,
+        'mechanism': 'webrtc_apm',
+        'captureProvenLive': true,
+        'erleDb': RealtimeAudioEchoCancellationState.erleTrustThresholdDb - 0.001,
+      });
+      expect(justBelow.trustsFullDuplex, false);
+
       // The platform mechanism (iOS VPIO / Android hardware AEC) is
       // OEM-attested — no ERLE requirement (none is reported there).
       final platform = decode(const {

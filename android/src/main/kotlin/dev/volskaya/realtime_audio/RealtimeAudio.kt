@@ -466,24 +466,14 @@ class RealtimeAudio(
   /// ghost); `webrtc_apm` for a live software APM (AEC3 on the shipped
   /// policy), with the APM's measured ERLE riding along so consumers can
   /// trust full duplex on cancellation EVIDENCE, not liveness.
-  private fun echoCancellationStateMap(): Map<String, Any?> {
-    val apmLive = webRtcApm?.isAvailable == true
-    val hwLive = hardwareAec != null
-    val mechanism = when {
-      hwLive -> EchoMechanism.PLATFORM_AEC
-      apmLive -> EchoMechanism.WEBRTC_APM
-      else -> EchoMechanism.NONE
-    }
-
-    return mapOf(
-      "requested" to arguments.voiceProcessing,
-      "nativeEnabled" to (hwLive || apmLive),
-      "mechanism" to mechanism.wire,
-      "captureProvenLive" to captureProvenLive,
-      "erleDb" to webRtcApm?.echoReturnLossEnhancementDb(),
-      "apmMode" to if (apmLive) (if (echoDecision.apmMobileAec) "aecm" else "aec3") else null,
-    )
-  }
+  private fun echoCancellationStateMap(): Map<String, Any?> = EchoStateReadback.build(
+    requested = arguments.voiceProcessing,
+    captureProvenLive = captureProvenLive,
+    hardwareAecAttached = hardwareAec != null,
+    apmLive = webRtcApm?.isAvailable == true,
+    apmMobileAec = echoDecision.apmMobileAec,
+    erleDb = webRtcApm?.echoReturnLossEnhancementDb(),
+  )
 
   //
 
