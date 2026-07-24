@@ -10,7 +10,18 @@
 * Make recorder toggles transactional and restore the previous native graph
   when reconfiguration fails.
 * Report AVAudioSession `!pri` (`561017449`) as the stable, recoverable
-  `audio_session_insufficient_priority` platform error.
+  `audio_session_insufficient_priority` platform error, and actually make it
+  retryable: a failed `create` is no longer cached, so the next call reaches
+  the platform again instead of replaying the stale failure forever.
+* Never create a native engine as a side effect of `dispose()`. Disposal now
+  awaits an in-flight create but never starts one, so tearing down an unused
+  instance cannot acquire the audio session.
+* Only touch `AVAudioEngine.inputNode` while the session is record-capable.
+  A playback-only engine no longer materialises the shared I/O unit, and the
+  VoiceProcessingIO *disable* now runs before the session drops to `.playback`
+  rather than after.
+* Tag capture liveness with a generation so a tap callback left over from a
+  torn-down capture path cannot mark the replacement path as proven live.
 
 ## 0.0.16
 

@@ -317,6 +317,80 @@ void main() {
     );
   });
 
+  test('a failed create is retried instead of being cached forever', () async {
+    var creates = 0;
+    messenger.setMockMethodCallHandler(_pluginChannel, (call) async {
+      switch (call.method) {
+        case 'create':
+          creates++;
+          if (creates == 1) {
+            throw PlatformException(
+              code: RealtimeAudioErrorCode.audioSessionInsufficientPriority,
+              message: 'Another call owns audio',
+            );
+          }
+          return <String, dynamic>{'id': 'retried-engine'};
+        case 'destroy':
+          return <String, dynamic>{};
+      }
+      return null;
+    });
+    const retriedEngineChannel = MethodChannel(
+      'dev.volskaya.RealtimeAudio/engines/retried-engine',
+    );
+    messenger.setMockMethodCallHandler(retriedEngineChannel, (_) async => null);
+    final audio = RealtimeAudio(recorderEnabled: true);
+    addTearDown(() async {
+      await audio.dispose();
+      messenger.setMockMethodCallHandler(retriedEngineChannel, null);
+      messenger.setMockMethodCallHandler(_pluginChannel, null);
+    });
+
+    await expectLater(audio.start(), throwsA(isA<PlatformException>()));
+
+    // `audio_session_insufficient_priority` is transient — another app owned
+    // the session at that instant — so the next call must reach the platform.
+    await audio.start();
+    expect(creates, 2);
+  });
+
+  test('disposing an unused engine never creates a native one', () async {
+    final invoked = <String>[];
+    messenger.setMockMethodCallHandler(_pluginChannel, (call) async {
+      invoked.add(call.method);
+      if (call.method == 'create') {
+        return <String, dynamic>{'id': 'never-created'};
+      }
+      return <String, dynamic>{};
+    });
+    addTearDown(() => messenger.setMockMethodCallHandler(_pluginChannel, null));
+
+    await RealtimeAudio(recorderEnabled: true).dispose();
+
+    expect(invoked, isEmpty);
+  });
+
+  test('a disposed engine does not re-create itself', () async {
+    final invoked = <String>[];
+    messenger.setMockMethodCallHandler(_pluginChannel, (call) async {
+      invoked.add(call.method);
+      if (call.method == 'create') {
+        return <String, dynamic>{'id': 'disposed-engine'};
+      }
+      return <String, dynamic>{};
+    });
+    addTearDown(() => messenger.setMockMethodCallHandler(_pluginChannel, null));
+
+    final audio = RealtimeAudio(recorderEnabled: true);
+    await audio.isInitialized;
+    await audio.dispose();
+    invoked.clear();
+
+    await audio.start();
+
+    expect(invoked, isEmpty);
+  });
+
   group('method channel round-trips', () {
     late RealtimeAudio audio;
     MethodChannel? engineChannel;

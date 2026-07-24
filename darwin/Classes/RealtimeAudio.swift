@@ -38,6 +38,10 @@ class RealtimeAudio: NSObject {
   private var audioPlayerNode: ChunkAudioPlayerNode!
   private var audioBackgroundNode: LoopAudioPlayerNode?
   private var audioCaptureStrategy: IOSAudioCaptureStrategy = .none
+  /// Whether this engine has ever turned the shared VoiceProcessingIO unit on.
+  /// Gates `AVAudioEngine.inputNode` access, which is only legal while the
+  /// session is record-capable — see `IOSVoiceProcessingTransition`.
+  private var voiceProcessingIsApplied = false
 
   private var playerVolumeTimer: DispatchSourceTimer?
   private var playerProgressTimer: DispatchSourceTimer?
@@ -55,6 +59,11 @@ class RealtimeAudio: NSObject {
   /// tap was (re)installed — bubbles' `captureProvenLive`. Read back via
   /// `getEchoCancellationState`. Monotonic false→true within a capture session.
   private var captureProvenLive = false
+
+  /// Bumped every time capture liveness is invalidated. A tap callback that was
+  /// already in flight when its tap was torn down carries the old generation,
+  /// so it can never resurrect liveness for the capture path that replaced it.
+  private var captureGeneration: UInt64 = 0
 
   /// Mutable override for recorder state — allows dynamic toggling without
   /// disposing the engine. `nil` means use `arguments.recorderEnabled`.
@@ -202,16 +211,34 @@ class RealtimeAudio: NSObject {
 
   private func applyVoiceProcessingStrategy() throws {
     #if os(iOS)
-      let shouldEnable = audioCaptureStrategy == .inputVoiceProcessing
+      let transition = IOSVoiceProcessingPolicy.transition(
+        target: audioCaptureStrategy,
+        isApplied: voiceProcessingIsApplied
+      )
+      guard transition != .leaveUntouched else { return }
+
+      let shouldEnable = transition == .enable
       if audioEngine.inputNode.isVoiceProcessingEnabled != shouldEnable {
         // VoiceProcessingIO is one shared I/O unit: enabling either node
         // enables both. Input-only avoids the output-node initialization path
         // that produced silent graphs and main-thread stalls on device.
         try audioEngine.inputNode.setVoiceProcessingEnabled(shouldEnable)
       }
+      voiceProcessingIsApplied = shouldEnable
       if shouldEnable {
         audioEngine.inputNode.isVoiceProcessingAGCEnabled = false
       }
+    #endif
+  }
+
+  private func voiceProcessingTransitionPrecedesSessionReconfiguration() -> Bool {
+    #if os(iOS)
+      return IOSVoiceProcessingPolicy.transition(
+        target: audioCaptureStrategy,
+        isApplied: voiceProcessingIsApplied
+      ).mustPrecedeSessionReconfiguration
+    #else
+      return false
     #endif
   }
 
@@ -872,7 +899,7 @@ extension RealtimeAudio {
     if !isRecorderEnabled { return }
 
     // New capture session — capture liveness is unproven until the first buffer.
-    captureProvenLive = false
+    let generation = invalidateCaptureLiveness()
     removeRecorderTap()
 
     let input = audioEngine.inputNode
@@ -895,7 +922,7 @@ extension RealtimeAudio {
       if buffer.frameLength > 0, !hasReportedLiveBuffer {
         hasReportedLiveBuffer = true
         self.nativeQueue.async { [weak self] in
-          guard let self, !isDisposed else { return }
+          guard let self, !isDisposed, generation == captureGeneration else { return }
           captureProvenLive = true
         }
       }
@@ -924,6 +951,15 @@ extension RealtimeAudio {
       }
     }
     recorderTapInstalled = true
+  }
+
+  /// Reset capture liveness and return the token that identifies the new
+  /// capture path. Only a callback carrying this token may prove it live.
+  @discardableResult
+  private func invalidateCaptureLiveness() -> UInt64 {
+    captureProvenLive = false
+    captureGeneration &+= 1
+    return captureGeneration
   }
 
   private func removeRecorderTap() {
@@ -1083,19 +1119,28 @@ extension RealtimeAudio {
     }
     removeRecorderTap()
 
+    let targetStrategy =
+      strategy ?? negotiateAudioCaptureStrategy(recorderEnabled: enabled)
+    audioCaptureStrategy = targetStrategy
+
+    // Turning VoiceProcessingIO off has to happen while the session is still
+    // record-capable; the `.playback` session this transition is heading for
+    // has no valid input format to reconfigure the shared I/O unit against.
+    if voiceProcessingTransitionPrecedesSessionReconfiguration() {
+      try applyVoiceProcessingStrategy()
+    }
+
     try audioSession.configure(
       recorderEnabled: enabled,
       voiceProcessingRequested: arguments.voiceProcessing
     )
     try audioSession.activate()
-    audioCaptureStrategy =
-      strategy ?? negotiateAudioCaptureStrategy(recorderEnabled: enabled)
 
     #if os(iOS)
       if enabled && arguments.voiceProcessing && webRtcApm == nil {
         initializeApm()
       } else if !enabled {
-        captureProvenLive = false
+        invalidateCaptureLiveness()
         webRtcApm?.release()
         webRtcApm = nil
       }

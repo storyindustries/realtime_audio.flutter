@@ -20,6 +20,40 @@ enum IOSAudioCapturePolicy {
   }
 }
 
+/// What has to happen to the shared VoiceProcessingIO unit for a target
+/// capture strategy.
+enum IOSVoiceProcessingTransition: Equatable {
+  /// The unit was never turned on and is not wanted. `AVAudioEngine.inputNode`
+  /// must not even be materialised: with the recorder off the session is
+  /// `.playback`, where the input hardware format is invalid.
+  case leaveUntouched
+  case enable
+  case disable
+
+  /// Whether the toggle has to run BEFORE the audio session is reconfigured.
+  ///
+  /// Disabling reconfigures the I/O unit in place, so it needs the still
+  /// record-capable session; enabling needs the new record-capable session to
+  /// already be active.
+  var mustPrecedeSessionReconfiguration: Bool { self == .disable }
+}
+
+enum IOSVoiceProcessingPolicy {
+  static func transition(
+    target: IOSAudioCaptureStrategy,
+    isApplied: Bool
+  ) -> IOSVoiceProcessingTransition {
+    switch target {
+    case .inputVoiceProcessing:
+      // Always re-assert: the engine reads the unit's real state back, so a
+      // unit the system silently dropped is turned on again.
+      return .enable
+    case .none:
+      return isApplied ? .disable : .leaveUntouched
+    }
+  }
+}
+
 enum RealtimeAudioPlatformErrorCode: String, Equatable {
   case insufficientPriority = "audio_session_insufficient_priority"
   case internalFailure = "INTERNAL"

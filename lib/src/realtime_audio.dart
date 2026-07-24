@@ -61,7 +61,17 @@ class RealtimeAudio {
   final int recorderChunkInterval;
 
   Future<void>? _initialization;
-  Future<void> get isInitialized => _initialization ??= _initialize();
+
+  /// Lazily creates the native engine on first use and reuses that result.
+  ///
+  /// A *failed* create is deliberately not cached: it leaves no native instance
+  /// behind, and [RealtimeAudioErrorCode.audioSessionInsufficientPriority] is
+  /// transient by definition (another app owned the session at that instant),
+  /// so the next call must be allowed to reach the platform again.
+  Future<void> get isInitialized {
+    if (_isDisposed) return Future<void>.value();
+    return _initialization ??= _initializeOnce();
+  }
 
   static const _staticChannel = MethodChannel(
     'dev.volskaya.RealtimeAudio/plugin',
@@ -435,6 +445,17 @@ class RealtimeAudio {
 
   //
 
+  Future<void> _initializeOnce() async {
+    try {
+      await _initialize();
+    } catch (_) {
+      // Drop the rejected future so [isInitialized] retries rather than
+      // replaying a stale failure for the rest of this instance's life.
+      _initialization = null;
+      rethrow;
+    }
+  }
+
   Future<void> _initialize() async {
     final RealtimeAudioResponseCreate response =
         await RealtimeAudioArguments.create(
@@ -459,11 +480,16 @@ class RealtimeAudio {
   Future<void> dispose() async {
     await _semaphore.acquire();
     try {
-      // A failed create has no native instance to destroy, but Dart stream
-      // resources still need deterministic cleanup.
-      try {
-        await isInitialized;
-      } catch (_) {}
+      // Await an IN-FLIGHT create so the native id is known before `destroy`,
+      // but never START one: disposing an engine that was never used must not
+      // acquire the audio session. A failed create has no native instance to
+      // destroy, but Dart stream resources still need deterministic cleanup.
+      final Future<void>? pendingInitialization = _initialization;
+      if (pendingInitialization != null) {
+        try {
+          await pendingInitialization;
+        } catch (_) {}
+      }
       if (_isDisposed) return;
       _channel?.setMethodCallHandler(null);
       _isDisposed = true;

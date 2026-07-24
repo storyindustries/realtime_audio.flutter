@@ -32,6 +32,45 @@ final class IOSAudioCapturePolicyTests: XCTestCase {
     )
   }
 
+  func testVoiceProcessingIsLeftUntouchedWhenItWasNeverEnabled() {
+    // `AVAudioEngine.inputNode` may only be materialised while the session is
+    // record-capable. A playback-only engine never requests voice processing,
+    // so it must not instantiate the shared I/O unit at all.
+    XCTAssertEqual(
+      IOSVoiceProcessingPolicy.transition(target: .none, isApplied: false),
+      .leaveUntouched
+    )
+  }
+
+  func testVoiceProcessingIsDisabledOnlyAfterItWasApplied() {
+    XCTAssertEqual(
+      IOSVoiceProcessingPolicy.transition(target: .none, isApplied: true),
+      .disable
+    )
+  }
+
+  func testVoiceProcessingIsReassertedEvenWhenAlreadyApplied() {
+    // The read-back in the engine is authoritative; the policy must keep asking
+    // so a unit the system silently dropped is turned back on.
+    XCTAssertEqual(
+      IOSVoiceProcessingPolicy.transition(target: .inputVoiceProcessing, isApplied: false),
+      .enable
+    )
+    XCTAssertEqual(
+      IOSVoiceProcessingPolicy.transition(target: .inputVoiceProcessing, isApplied: true),
+      .enable
+    )
+  }
+
+  func testDisablingVoiceProcessingPrecedesThePlaybackOnlySession() {
+    // Turning the shared I/O unit off reconfigures it in place, so it has to
+    // happen while the session still exposes a valid input format. Turning it
+    // on requires the record-capable session to already be active.
+    XCTAssertTrue(IOSVoiceProcessingTransition.disable.mustPrecedeSessionReconfiguration)
+    XCTAssertFalse(IOSVoiceProcessingTransition.enable.mustPrecedeSessionReconfiguration)
+    XCTAssertFalse(IOSVoiceProcessingTransition.leaveUntouched.mustPrecedeSessionReconfiguration)
+  }
+
   func testRecorderTransitionCommitsOnlyAfterNativeApplySucceeds() throws {
     var actions: [String] = []
 
