@@ -7,7 +7,8 @@ const _pluginChannel = MethodChannel('dev.volskaya.RealtimeAudio/plugin');
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
-  final messenger = TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
+  final messenger =
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
 
   group('data model decoding', () {
     test('RealtimeAudioState decodes the additive render-clock fields', () {
@@ -49,107 +50,184 @@ void main() {
       expect(clock.renderClock, const Duration(milliseconds: 3820));
     });
 
-    test('barrel exposes RealtimeAudioInstanceResponseClearQueue with the folded clock', () {
-      // Named directly from the package barrel — consumers must be able to type
-      // clearQueue()'s response (and its .clock) without an implementation import.
-      final RealtimeAudioInstanceResponseClearQueue response =
-          RealtimeAudioInstanceResponseClearQueue.fromJson(const {
-        'chunk': {
-          'id': 'chunk-1',
-          'sampleRate': 24000.0,
-          'sampleTime': 2400,
-          'sampleTimeTotal': 4800,
-          'chunkSampleTime': 1200,
-          'chunkSampleTimeTotal': 2400,
-        },
-        'clock': {
-          'renderClockMs': 1900,
-          'renderedMs': 1850,
-          'scheduledMs': 4000,
-          'isRendering': false,
-        },
-      });
+    test(
+      'barrel exposes RealtimeAudioInstanceResponseClearQueue with the folded clock',
+      () {
+        // Named directly from the package barrel — consumers must be able to type
+        // clearQueue()'s response (and its .clock) without an implementation import.
+        final RealtimeAudioInstanceResponseClearQueue response =
+            RealtimeAudioInstanceResponseClearQueue.fromJson(const {
+              'chunk': {
+                'id': 'chunk-1',
+                'sampleRate': 24000.0,
+                'sampleTime': 2400,
+                'sampleTimeTotal': 4800,
+                'chunkSampleTime': 1200,
+                'chunkSampleTimeTotal': 2400,
+              },
+              'clock': {
+                'renderClockMs': 1900,
+                'renderedMs': 1850,
+                'scheduledMs': 4000,
+                'isRendering': false,
+              },
+            });
 
-      final RealtimeAudioClearQueueChunkData? chunk = response.chunk;
-      final RealtimeAudioPlaybackClock? clock = response.clock;
-      expect(chunk?.id, 'chunk-1');
-      expect(clock?.renderClockMs, 1900);
-      expect(clock?.scheduledMs, 4000);
-    });
+        final RealtimeAudioClearQueueChunkData? chunk = response.chunk;
+        final RealtimeAudioPlaybackClock? clock = response.clock;
+        expect(chunk?.id, 'chunk-1');
+        expect(clock?.renderClockMs, 1900);
+        expect(clock?.scheduledMs, 4000);
+      },
+    );
 
-    test('RealtimeAudioEchoCancellationState trust predicate follows bubbles', () {
+    test(
+      'RealtimeAudioEchoCancellationState trust predicate follows bubbles',
+      () {
+        RealtimeAudioEchoCancellationState decode(Map<String, dynamic> json) =>
+            RealtimeAudioEchoCancellationState.fromJson(json);
+
+        final trusted = decode(const {
+          'requested': true,
+          'nativeEnabled': true,
+          'mechanism': 'platform_aec',
+          'captureProvenLive': true,
+        });
+        expect(
+          trusted.mechanism,
+          RealtimeAudioEchoCancellationMechanism.platformAec,
+        );
+        expect(trusted.trustsFullDuplex, true);
+
+        // Requested + mechanism present, but the device never confirmed enable →
+        // NOT trusted (never assume).
+        final notReadBack = decode(const {
+          'requested': true,
+          'nativeEnabled': false,
+          'mechanism': 'webrtc_apm',
+          'captureProvenLive': true,
+        });
+        expect(
+          notReadBack.mechanism,
+          RealtimeAudioEchoCancellationMechanism.webrtcApm,
+        );
+        expect(notReadBack.trustsFullDuplex, false);
+
+        final noCapture = decode(const {
+          'requested': true,
+          'nativeEnabled': true,
+          'mechanism': 'webrtc_apm',
+          'captureProvenLive': false,
+        });
+        expect(noCapture.trustsFullDuplex, false);
+
+        final unknownMechanism = decode(const {
+          'requested': false,
+          'nativeEnabled': false,
+          'mechanism': 'something-new',
+          'captureProvenLive': false,
+        });
+        expect(
+          unknownMechanism.mechanism,
+          RealtimeAudioEchoCancellationMechanism.none,
+        );
+        expect(unknownMechanism.trustsFullDuplex, false);
+      },
+    );
+
+    test('software AEC trusts full duplex only on measured ERLE evidence', () {
       RealtimeAudioEchoCancellationState decode(Map<String, dynamic> json) =>
           RealtimeAudioEchoCancellationState.fromJson(json);
 
-      final trusted = decode(const {
+      // A RUNNING software APM is not a CANCELLING one — the 2026-07-24
+      // Android echo RCA: liveness-based trust ran full duplex over a dead
+      // canceller. webrtc_apm may claim full-duplex trust only once the APM's
+      // own echo-return-loss-enhancement proves convergence.
+      final runningButUnproven = decode(const {
+        'requested': true,
+        'nativeEnabled': true,
+        'mechanism': 'webrtc_apm',
+        'captureProvenLive': true,
+      });
+      expect(runningButUnproven.erleDb, isNull);
+      expect(runningButUnproven.trustsFullDuplex, false);
+
+      final weakErle = decode(const {
+        'requested': true,
+        'nativeEnabled': true,
+        'mechanism': 'webrtc_apm',
+        'captureProvenLive': true,
+        'erleDb': 2.5,
+        'apmMode': 'aec3',
+      });
+      expect(weakErle.trustsFullDuplex, false);
+
+      final converged = decode(const {
+        'requested': true,
+        'nativeEnabled': true,
+        'mechanism': 'webrtc_apm',
+        'captureProvenLive': true,
+        'erleDb': 9.0,
+        'apmMode': 'aec3',
+      });
+      expect(converged.erleDb, 9.0);
+      expect(converged.apmMode, 'aec3');
+      expect(converged.trustsFullDuplex, true);
+
+      // The platform mechanism (iOS VPIO / Android hardware AEC) is
+      // OEM-attested — no ERLE requirement (none is reported there).
+      final platform = decode(const {
         'requested': true,
         'nativeEnabled': true,
         'mechanism': 'platform_aec',
         'captureProvenLive': true,
       });
-      expect(trusted.mechanism, RealtimeAudioEchoCancellationMechanism.platformAec);
-      expect(trusted.trustsFullDuplex, true);
-
-      // Requested + mechanism present, but the device never confirmed enable →
-      // NOT trusted (never assume).
-      final notReadBack = decode(const {
-        'requested': true,
-        'nativeEnabled': false,
-        'mechanism': 'webrtc_apm',
-        'captureProvenLive': true,
-      });
-      expect(notReadBack.mechanism, RealtimeAudioEchoCancellationMechanism.webrtcApm);
-      expect(notReadBack.trustsFullDuplex, false);
-
-      final noCapture = decode(const {
-        'requested': true,
-        'nativeEnabled': true,
-        'mechanism': 'webrtc_apm',
-        'captureProvenLive': false,
-      });
-      expect(noCapture.trustsFullDuplex, false);
-
-      final unknownMechanism = decode(const {
-        'requested': false,
-        'nativeEnabled': false,
-        'mechanism': 'something-new',
-        'captureProvenLive': false,
-      });
-      expect(unknownMechanism.mechanism, RealtimeAudioEchoCancellationMechanism.none);
-      expect(unknownMechanism.trustsFullDuplex, false);
+      expect(platform.trustsFullDuplex, true);
     });
 
-    test('RealtimeAudioEngineHealthEvent decodes structured recovery outcomes', () {
-      final event = RealtimeAudioEngineHealthEvent.fromMap(const {
-        'type': 'configuration_change_recovery_failed',
-        'engineWasRunning': false,
-        'queuedChunkCount': 3,
-        'message': 'audio input unavailable',
-      });
+    test(
+      'RealtimeAudioEngineHealthEvent decodes structured recovery outcomes',
+      () {
+        final event = RealtimeAudioEngineHealthEvent.fromMap(const {
+          'type': 'configuration_change_recovery_failed',
+          'engineWasRunning': false,
+          'queuedChunkCount': 3,
+          'message': 'audio input unavailable',
+        });
 
-      expect(event.type, RealtimeAudioEngineHealthEventType.configurationChangeRecoveryFailed);
-      expect(event.engineWasRunning, false);
-      expect(event.queuedChunkCount, 3);
-      expect(event.message, 'audio input unavailable');
+        expect(
+          event.type,
+          RealtimeAudioEngineHealthEventType.configurationChangeRecoveryFailed,
+        );
+        expect(event.engineWasRunning, false);
+        expect(event.queuedChunkCount, 3);
+        expect(event.message, 'audio input unavailable');
 
-      final drainFailure = RealtimeAudioEngineHealthEvent.fromMap(const {
-        'type': 'playback_drain_signal_failed',
-        'engineWasRunning': true,
-        'queuedChunkCount': 1,
-      });
-      expect(drainFailure.type, RealtimeAudioEngineHealthEventType.playbackDrainSignalFailed);
+        final drainFailure = RealtimeAudioEngineHealthEvent.fromMap(const {
+          'type': 'playback_drain_signal_failed',
+          'engineWasRunning': true,
+          'queuedChunkCount': 1,
+        });
+        expect(
+          drainFailure.type,
+          RealtimeAudioEngineHealthEventType.playbackDrainSignalFailed,
+        );
 
-      final drained = RealtimeAudioEngineHealthEvent.fromMap(const {
-        'type': 'playback_queue_drained',
-        'engineWasRunning': true,
-        'queuedChunkCount': 0,
-        'outputRoute': 'bluetooth',
-        'outputSampleRate': 48_000,
-      });
-      expect(drained.type, RealtimeAudioEngineHealthEventType.playbackQueueDrained);
-      expect(drained.outputRoute, 'bluetooth');
-      expect(drained.outputSampleRate, 48_000);
-    });
+        final drained = RealtimeAudioEngineHealthEvent.fromMap(const {
+          'type': 'playback_queue_drained',
+          'engineWasRunning': true,
+          'queuedChunkCount': 0,
+          'outputRoute': 'bluetooth',
+          'outputSampleRate': 48_000,
+        });
+        expect(
+          drained.type,
+          RealtimeAudioEngineHealthEventType.playbackQueueDrained,
+        );
+        expect(drained.outputRoute, 'bluetooth');
+        expect(drained.outputSampleRate, 48_000);
+      },
+    );
 
     test('playback recovery results decode typed reasons and clocks', () {
       final repair = RealtimeAudioPlaybackAccountingRepair.fromMap(const {
@@ -173,7 +251,10 @@ void main() {
         },
       });
 
-      expect(repair.reason, RealtimeAudioPlaybackAccountingRepairReason.scheduledExtentChanged);
+      expect(
+        repair.reason,
+        RealtimeAudioPlaybackAccountingRepairReason.scheduledExtentChanged,
+      );
       expect(repair.clock.scheduledMs, 280);
       expect(wedge.recovered, false);
       expect(wedge.message, 'engine restart failed');
@@ -197,7 +278,9 @@ void main() {
 
       audio = RealtimeAudio(recorderEnabled: true);
       await audio.isInitialized;
-      engineChannel = const MethodChannel('dev.volskaya.RealtimeAudio/engines/test-engine');
+      engineChannel = const MethodChannel(
+        'dev.volskaya.RealtimeAudio/engines/test-engine',
+      );
     });
 
     tearDown(() async {
@@ -205,108 +288,126 @@ void main() {
       messenger.setMockMethodCallHandler(_pluginChannel, null);
     });
 
-    test('getPlayerPlayedDuration invokes the engine channel and types the result', () async {
-      final invoked = <String>[];
-      messenger.setMockMethodCallHandler(engineChannel!, (call) async {
-        invoked.add(call.method);
-        if (call.method == 'getPlayerPlayedDuration') {
-          return <String, dynamic>{
-            'renderClockMs': 3820,
-            'renderedMs': 3800,
-            'scheduledMs': 4000,
-            'isRendering': false,
-          };
-        }
-        return null;
-      });
-
-      final clock = await audio.getPlayerPlayedDuration();
-
-      expect(invoked, contains('getPlayerPlayedDuration'));
-      expect(clock, isNotNull);
-      expect(clock!.renderClockMs, 3820);
-      expect(clock.renderedMs, 3800);
-      expect(clock.scheduledMs, 4000);
-      expect(clock.isRendering, false);
-    });
-
-    test('clearQueue returns the folded lifetime clock alongside the chunk', () async {
-      messenger.setMockMethodCallHandler(engineChannel!, (call) async {
-        if (call.method == 'clearQueue') {
-          return <String, dynamic>{
-            'chunk': <String, dynamic>{
-              'id': 'chunk-1',
-              'sampleRate': 24000.0,
-              'sampleTime': 2400,
-              'sampleTimeTotal': 4800,
-              'chunkSampleTime': 1200,
-              'chunkSampleTimeTotal': 2400,
-            },
-            'clock': <String, dynamic>{
-              'renderClockMs': 1900,
-              'renderedMs': 1850,
+    test(
+      'getPlayerPlayedDuration invokes the engine channel and types the result',
+      () async {
+        final invoked = <String>[];
+        messenger.setMockMethodCallHandler(engineChannel!, (call) async {
+          invoked.add(call.method);
+          if (call.method == 'getPlayerPlayedDuration') {
+            return <String, dynamic>{
+              'renderClockMs': 3820,
+              'renderedMs': 3800,
               'scheduledMs': 4000,
               'isRendering': false,
-            },
-          };
-        }
-        return null;
-      });
+            };
+          }
+          return null;
+        });
 
-      final response = await audio.clearQueue();
+        final clock = await audio.getPlayerPlayedDuration();
 
-      expect(response, isNotNull);
-      expect(response!.chunk?.id, 'chunk-1');
-      // The barge cut position, device-truth, comes from the folded render clock.
-      expect(response.clock?.renderClockMs, 1900);
-      expect(response.clock?.scheduledMs, 4000);
-    });
+        expect(invoked, contains('getPlayerPlayedDuration'));
+        expect(clock, isNotNull);
+        expect(clock!.renderClockMs, 3820);
+        expect(clock.renderedMs, 3800);
+        expect(clock.scheduledMs, 4000);
+        expect(clock.isRendering, false);
+      },
+    );
 
-    test('getEchoCancellationState invokes the engine channel and types the result', () async {
-      final invoked = <String>[];
-      messenger.setMockMethodCallHandler(engineChannel!, (call) async {
-        invoked.add(call.method);
-        if (call.method == 'getEchoCancellationState') {
-          return <String, dynamic>{
-            'requested': true,
-            'nativeEnabled': true,
-            'mechanism': 'platform_aec',
-            'captureProvenLive': true,
-          };
-        }
-        return null;
-      });
+    test(
+      'clearQueue returns the folded lifetime clock alongside the chunk',
+      () async {
+        messenger.setMockMethodCallHandler(engineChannel!, (call) async {
+          if (call.method == 'clearQueue') {
+            return <String, dynamic>{
+              'chunk': <String, dynamic>{
+                'id': 'chunk-1',
+                'sampleRate': 24000.0,
+                'sampleTime': 2400,
+                'sampleTimeTotal': 4800,
+                'chunkSampleTime': 1200,
+                'chunkSampleTimeTotal': 2400,
+              },
+              'clock': <String, dynamic>{
+                'renderClockMs': 1900,
+                'renderedMs': 1850,
+                'scheduledMs': 4000,
+                'isRendering': false,
+              },
+            };
+          }
+          return null;
+        });
 
-      final aec = await audio.getEchoCancellationState();
+        final response = await audio.clearQueue();
 
-      expect(invoked, contains('getEchoCancellationState'));
-      expect(aec, isNotNull);
-      expect(aec!.requested, true);
-      expect(aec.nativeEnabled, true);
-      expect(aec.mechanism, RealtimeAudioEchoCancellationMechanism.platformAec);
-      expect(aec.captureProvenLive, true);
-      expect(aec.trustsFullDuplex, true);
-    });
+        expect(response, isNotNull);
+        expect(response!.chunk?.id, 'chunk-1');
+        // The barge cut position, device-truth, comes from the folded render clock.
+        expect(response.clock?.renderClockMs, 1900);
+        expect(response.clock?.scheduledMs, 4000);
+      },
+    );
 
-    test('audioEngineHealth native callback is exposed as a typed stream', () async {
-      final eventFuture = audio.engineHealthStream.first;
+    test(
+      'getEchoCancellationState invokes the engine channel and types the result',
+      () async {
+        final invoked = <String>[];
+        messenger.setMockMethodCallHandler(engineChannel!, (call) async {
+          invoked.add(call.method);
+          if (call.method == 'getEchoCancellationState') {
+            return <String, dynamic>{
+              'requested': true,
+              'nativeEnabled': true,
+              'mechanism': 'platform_aec',
+              'captureProvenLive': true,
+            };
+          }
+          return null;
+        });
 
-      await messenger.handlePlatformMessage(
-        engineChannel!.name,
-        const StandardMethodCodec().encodeMethodCall(
-          const MethodCall('audioEngineHealth', <String, dynamic>{
-            'type': 'configuration_change_recovered',
-            'engineWasRunning': false,
-            'queuedChunkCount': 2,
-          }),
-        ),
-        (_) {},
-      );
+        final aec = await audio.getEchoCancellationState();
 
-      final event = await eventFuture;
-      expect(event.type, RealtimeAudioEngineHealthEventType.configurationChangeRecovered);
-      expect(event.queuedChunkCount, 2);
-    });
+        expect(invoked, contains('getEchoCancellationState'));
+        expect(aec, isNotNull);
+        expect(aec!.requested, true);
+        expect(aec.nativeEnabled, true);
+        expect(
+          aec.mechanism,
+          RealtimeAudioEchoCancellationMechanism.platformAec,
+        );
+        expect(aec.captureProvenLive, true);
+        expect(aec.trustsFullDuplex, true);
+      },
+    );
+
+    test(
+      'audioEngineHealth native callback is exposed as a typed stream',
+      () async {
+        final eventFuture = audio.engineHealthStream.first;
+
+        await messenger.handlePlatformMessage(
+          engineChannel!.name,
+          const StandardMethodCodec().encodeMethodCall(
+            const MethodCall('audioEngineHealth', <String, dynamic>{
+              'type': 'configuration_change_recovered',
+              'engineWasRunning': false,
+              'queuedChunkCount': 2,
+            }),
+          ),
+          (_) {},
+        );
+
+        final event = await eventFuture;
+        expect(
+          event.type,
+          RealtimeAudioEngineHealthEventType.configurationChangeRecovered,
+        );
+        expect(event.queuedChunkCount, 2);
+      },
+    );
 
     test('repairPlaybackAccounting sends the expected extent CAS', () async {
       Object? sentArguments;
@@ -327,33 +428,38 @@ void main() {
         return null;
       });
 
-      final result = await audio.repairPlaybackAccounting(expectedScheduledMs: 4000);
+      final result = await audio.repairPlaybackAccounting(
+        expectedScheduledMs: 4000,
+      );
 
       expect(sentArguments, <String, dynamic>{'expectedScheduledMs': 4000});
       expect(result?.repaired, true);
       expect(result?.clock.isRendering, false);
     });
 
-    test('recoverWedgedPlayback exposes destructive recovery outcome', () async {
-      messenger.setMockMethodCallHandler(engineChannel!, (call) async {
-        if (call.method == 'recoverWedgedPlayback') {
-          return <String, dynamic>{
-            'recovered': true,
-            'clock': <String, dynamic>{
-              'renderClockMs': 1200,
-              'renderedMs': 1000,
-              'scheduledMs': 4000,
-              'isRendering': false,
-            },
-          };
-        }
-        return null;
-      });
+    test(
+      'recoverWedgedPlayback exposes destructive recovery outcome',
+      () async {
+        messenger.setMockMethodCallHandler(engineChannel!, (call) async {
+          if (call.method == 'recoverWedgedPlayback') {
+            return <String, dynamic>{
+              'recovered': true,
+              'clock': <String, dynamic>{
+                'renderClockMs': 1200,
+                'renderedMs': 1000,
+                'scheduledMs': 4000,
+                'isRendering': false,
+              },
+            };
+          }
+          return null;
+        });
 
-      final result = await audio.recoverWedgedPlayback();
+        final result = await audio.recoverWedgedPlayback();
 
-      expect(result?.recovered, true);
-      expect(result?.clock.renderClockMs, 1200);
-    });
+        expect(result?.recovered, true);
+        expect(result?.clock.renderClockMs, 1200);
+      },
+    );
   });
 }

@@ -19,6 +19,8 @@ _$RealtimeAudioEchoCancellationStateFromJson(Map json) =>
           ) ??
           RealtimeAudioEchoCancellationMechanism.none,
       captureProvenLive: json['captureProvenLive'] as bool? ?? false,
+      erleDb: (json['erleDb'] as num?)?.toDouble(),
+      apmMode: json['apmMode'] as String?,
     );
 
 Map<String, dynamic> _$RealtimeAudioEchoCancellationStateToJson(
@@ -29,6 +31,8 @@ Map<String, dynamic> _$RealtimeAudioEchoCancellationStateToJson(
   'mechanism':
       _$RealtimeAudioEchoCancellationMechanismEnumMap[instance.mechanism]!,
   'captureProvenLive': instance.captureProvenLive,
+  'erleDb': instance.erleDb,
+  'apmMode': instance.apmMode,
 };
 
 const _$RealtimeAudioEchoCancellationMechanismEnumMap = {
