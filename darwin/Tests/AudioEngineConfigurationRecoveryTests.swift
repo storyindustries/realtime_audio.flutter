@@ -113,6 +113,38 @@ final class AudioEngineConfigurationRecoveryTests: XCTestCase {
     XCTAssertEqual(actions, ["capture", "engine", "cleanup"])
   }
 
+  func testPreservedPlaybackIsDrivenAfterRestartWithoutConsultingStalePlayerState() {
+    var playCount = 0
+
+    AudioEngineConfigurationRecovery.resumePreservedPlayback(
+      shouldRestart: true,
+      shouldBePaused: false,
+      hasQueuedAudio: true,
+      play: { playCount += 1 }
+    )
+
+    XCTAssertEqual(playCount, 1)
+  }
+
+  func testPreservedPlaybackIsNotDrivenWhenPausedOrQueueIsEmpty() {
+    var playCount = 0
+
+    AudioEngineConfigurationRecovery.resumePreservedPlayback(
+      shouldRestart: true,
+      shouldBePaused: true,
+      hasQueuedAudio: true,
+      play: { playCount += 1 }
+    )
+    AudioEngineConfigurationRecovery.resumePreservedPlayback(
+      shouldRestart: true,
+      shouldBePaused: false,
+      hasQueuedAudio: false,
+      play: { playCount += 1 }
+    )
+
+    XCTAssertEqual(playCount, 0)
+  }
+
   func testWedgeOnHealthyEngineDiscardsPlayerWithoutEngineRestart() {
     XCTAssertEqual(PlaybackWedgeRecoveryPolicy.decide(engineIsRunning: true), .discardPlayerOnly)
   }

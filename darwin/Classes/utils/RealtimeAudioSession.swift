@@ -31,19 +31,23 @@ class RealtimeAudioSession {
     #endif
   }
 
-  func configure(recorderEnabled: Bool) throws {
+  func configure(recorderEnabled: Bool, voiceProcessingRequested: Bool) throws {
     #if os(iOS)
       if !recorderEnabled {
         try instance.setCategory(.playback, mode: .spokenAudio, options: [.duckOthers])
         try instance.setPreferredInputOrientation(.portrait)
       } else {
+        // VoiceProcessingIO supplies AEC for voice calls. Do not also request
+        // session echo-cancelled input: that preference is valid only in
+        // `.default`, while this graph requires `.voiceChat`.
+        let mode: AVAudioSession.Mode =
+          voiceProcessingRequested
+          ? .voiceChat
+          : .default
         try instance.setCategory(
-          .playAndRecord, mode: .voiceChat, options: [.defaultToSpeaker, .allowBluetoothHFP, .duckOthers])
+          .playAndRecord, mode: mode, options: [.defaultToSpeaker, .allowBluetoothHFP, .duckOthers])
         try instance.setPreferredInputOrientation(.portrait)
         try instance.setAllowHapticsAndSystemSoundsDuringRecording(false)
-        if #available(iOS 18.2, *) {
-          try instance.setPrefersEchoCancelledInput(true)
-        }
       }
     #endif
   }

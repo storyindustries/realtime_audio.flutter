@@ -10,7 +10,9 @@ import Foundation
 @objc public class RealtimeAudioPlugin: NSObject, FlutterPlugin {
   let messenger: FlutterBinaryMessenger
   let methodChannel: FlutterMethodChannel
+  let heartbeatChannel: FlutterMethodChannel
 
+  private let nativeQueue = DispatchQueue(label: "dev.volskaya.RealtimeAudio.native")
   private var realtimeAudioInstances: [String: RealtimeAudio] = [:]
 
   public static func register(with registrar: any FlutterPluginRegistrar) {
@@ -19,35 +21,64 @@ import Foundation
   }
 
   init(_ registrar: FlutterPluginRegistrar) {
+    let messenger: FlutterBinaryMessenger
     #if os(iOS)
-      self.messenger = registrar.messenger()
+      messenger = registrar.messenger()
     #else
-      self.messenger = registrar.messenger
+      messenger = registrar.messenger
     #endif
+    self.messenger = messenger
 
     self.methodChannel = FlutterMethodChannel(
       name: "dev.volskaya.RealtimeAudio/plugin",
-      binaryMessenger: self.messenger
+      binaryMessenger: messenger
+    )
+    self.heartbeatChannel = FlutterMethodChannel(
+      name: "dev.volskaya.RealtimeAudio/main-thread-heartbeat",
+      binaryMessenger: messenger
     )
 
     super.init()
+    heartbeatChannel.setMethodCallHandler { call, result in
+      guard call.method == "ping" else {
+        result(FlutterMethodNotImplemented)
+        return
+      }
+      result(ProcessInfo.processInfo.systemUptime)
+    }
   }
 
   public func detachFromEngine(for registrar: any FlutterPluginRegistrar) {
-    disposeAllInstances()
+    heartbeatChannel.setMethodCallHandler(nil)
+    // Retain the plugin through queued disposal. The registrar may release its
+    // last reference immediately after detach returns.
+    nativeQueue.async {
+      self.disposeAllInstances()
+    }
   }
 
   public func handle(_ call: FlutterMethodCall, result: @escaping FlutterResult) {
-    do {
-      try handleFlutterMethodSafe(call: call, result: result)
-    } catch {
-      let flutterError = FlutterError(
-        code: "INTERNAL",
-        message: (error as? TextError)?.message ?? error.localizedDescription,
-        details: nil
-      )
-
-      result(flutterError)
+    let resultOnPlatformThread: FlutterResult = { value in
+      if Thread.isMainThread {
+        result(value)
+      } else {
+        DispatchQueue.main.async {
+          result(value)
+        }
+      }
+    }
+    nativeQueue.async { [weak self] in
+      guard let self else {
+        resultOnPlatformThread(
+          FlutterError(code: "INTERNAL", message: "Plugin detached.", details: nil)
+        )
+        return
+      }
+      do {
+        try self.handleFlutterMethodSafe(call: call, result: resultOnPlatformThread)
+      } catch {
+        resultOnPlatformThread(realtimeAudioFlutterError(error))
+      }
     }
   }
 
@@ -75,7 +106,8 @@ import Foundation
       let instance = try RealtimeAudio(
         id: id,
         arguments: arguments,
-        methodChannel: channel
+        methodChannel: channel,
+        nativeQueue: nativeQueue
       )
 
       realtimeAudioInstances[id] = instance
