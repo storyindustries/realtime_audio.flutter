@@ -25,7 +25,12 @@ interface ApmNativeBridge {
 
   fun processRender(ptr: Long, audioData: ByteArray)
 
-  /** AEC3-only echo-return-loss-enhancement metric; null while unreported. */
+  /**
+   * AEC3-only echo-return-loss-enhancement metric. Null when no echo
+   * controller reports one (AECM / released). AEC3 reports from its first
+   * processed block (~0 dB while unconverged) — presence is instantiation
+   * evidence, magnitude is the convergence evidence.
+   */
   fun echoReturnLossEnhancementDb(ptr: Long): Double?
 }
 
@@ -86,6 +91,6 @@ object WebRtcApmJni : ApmNativeBridge {
 
   private external fun nativeProcessRender(ptr: Long, audioData: ByteArray)
 
-  /** Returns NaN while the APM has no ERLE report (AECM, or too early). */
+  /** Returns NaN when no echo controller reports ERLE (AECM path). */
   private external fun nativeGetErleDb(ptr: Long): Double
 }

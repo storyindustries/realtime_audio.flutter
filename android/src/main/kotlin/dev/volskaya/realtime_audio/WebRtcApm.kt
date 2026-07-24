@@ -13,6 +13,12 @@ import android.util.Log
  * (`@Synchronized`): release() waits out any in-flight native call, and a
  * post-release call is a no-op — never a use-after-free (codex review of
  * biograph PR #674). Contract locked by WebRtcApmConcurrencyTest.
+ *
+ * The single monitor also serializes render vs capture processing — a
+ * deliberate trade: each render feed spans at most one provider slice
+ * (≤500ms ≈ tens of 10ms frames, a few ms of CPU), so the capture coroutine
+ * waits ≤ a few ms per 40ms chunk. Split read locks are not worth the
+ * complexity until profiling says otherwise.
  */
 class WebRtcApm(
     captureSampleRate: Int,

@@ -196,8 +196,9 @@ Java_dev_volskaya_realtime_1audio_WebRtcApmJni_nativeProcessRender(
 
 // AEC3 echo-return-loss-enhancement (dB) from the APM's own statistics — the
 // measured proof the canceller is actually cancelling (not merely running).
-// Returns NaN while unreported: AECM never reports it, and AEC3 needs a few
-// seconds of far-end + near-end audio before the estimate exists.
+// Returns NaN when no echo controller reports it (the AECM path). AEC3
+// populates the stat from its first processed block (~0 dB while
+// unconverged); consumers gate on magnitude, not presence.
 JNIEXPORT jdouble JNICALL
 Java_dev_volskaya_realtime_1audio_WebRtcApmJni_nativeGetErleDb(
     JNIEnv* env, jobject /* this */, jlong ptr) {

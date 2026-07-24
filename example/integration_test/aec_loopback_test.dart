@@ -170,10 +170,18 @@ void main() {
     );
 
     if (postState?.mechanism == RealtimeAudioEchoCancellationMechanism.webrtcApm) {
+      // AEC3 reports ERLE from its first processed block (~0 dB while
+      // unconverged), so non-null proves only instantiation — the gate must
+      // demand the same convergence evidence production trust does.
       expect(
         postState?.erleDb,
         isNotNull,
         reason: 'AEC3 reported no ERLE after 4s of double-talk-free far-end audio',
+      );
+      expect(
+        postState!.erleDb,
+        greaterThanOrEqualTo(RealtimeAudioEchoCancellationState.erleTrustThresholdDb),
+        reason: 'AEC3 never converged — production would (correctly) hold half-duplex',
       );
     }
   });

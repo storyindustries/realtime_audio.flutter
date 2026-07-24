@@ -96,6 +96,12 @@ class RealtimeAudio(
   )
   private var hardwareAec: AcousticEchoCanceler? = null
   private var hardwareNs: NoiseSuppressor? = null
+
+  /// Whether the playback AudioTrack was built on the voice-call path
+  /// (USAGE_VOICE_COMMUNICATION). Bound at engine creation — a later
+  /// setRecorderEnabled(true) must not claim the hardware echo path over a
+  /// media-usage track the HAL AEC never references.
+  private var playbackOnVoicePath: Boolean = false
   private val voiceCallSession = VoiceCallAudioSession(
     context.getSystemService(Context.AUDIO_SERVICE) as AudioManager,
   )
@@ -128,11 +134,28 @@ class RealtimeAudio(
 
     echoDecision = decideEchoPath(recorderEnabled = arguments.recorderEnabled)
     if (arguments.recorderEnabled && echoDecision.communicationMode) {
-      voiceCallSession.enter()
+      val commActive = voiceCallSession.enter()
+      if (!commActive && echoDecision.attachHardwareAec) {
+        // A hardware AEC without an established voice-call context has no
+        // far-end reference and cancels nothing — degrade to the software
+        // path, whose renderTap-fed AEC3 is routing-independent.
+        echoDecision = decideEchoPath(recorderEnabled = true, hardwareAecAvailable = false)
+      }
     }
-    recorder = if (arguments.recorderEnabled) getRecorder(echoDecision.captureSource) else null
-    if (arguments.recorderEnabled) {
-      setupEchoControl()
+    playbackOnVoicePath = echoDecision.voiceCommunicationPlayback
+    try {
+      recorder = if (arguments.recorderEnabled) getRecorder(echoDecision.captureSource) else null
+      if (arguments.recorderEnabled) {
+        setupEchoControl()
+      }
+    } catch (e: Throwable) {
+      // A construction failure has no owner to dispose() — release what this
+      // ctor acquired so the process-global comm mode cannot leak.
+      releaseHardwareEffects()
+      webRtcApm?.release()
+      webRtcApm = null
+      voiceCallSession.exit()
+      throw e
     }
     // NOTE: playback attributes are bound to the echo decision at engine
     // creation. Every voice-call consumer creates the engine with the
@@ -177,12 +200,13 @@ class RealtimeAudio(
         decision = decideEchoPath(recorderEnabled = true, hardwareAecAvailable = false)
         echoDecision = decision
         Log.w("RealtimeAudio", "Hardware AEC create failed — falling back to ${decision.mechanism.wire}")
-        runCatching {
-          rec.release()
-          recorder = getRecorder(decision.captureSource)
-        }.onFailure {
-          Log.w("RealtimeAudio", "Recorder recreate for software echo path failed: ${it.message}")
-        }
+        // Recreate the recorder on the software path's unprocessed source. A
+        // recreate failure must PROPAGATE (the old getRecorder contract): the
+        // released recorder must never be left installed as a silently-dead
+        // mic — the app's recorder-recovery path owns loud failures.
+        rec.release()
+        recorder = null
+        recorder = getRecorder(decision.captureSource)
       }
     }
     if (decision.useApm) {
@@ -488,6 +512,12 @@ class RealtimeAudio(
       this
     )
 
+  // NOTE: the background loop stays on the media path even during a voice
+  // call — it is NOT in the hardware AEC's far-end reference and is not fed
+  // to the software APM (renderTap covers only the assistant track), so any
+  // audible background leaks into the uplink uncancelled. The voice-call
+  // consumers run with backgroundEnabled=false; revisit before pairing
+  // background audio with a call.
   private fun getBackgroundTrack(audioSessionId: Int? = null) =
     LoopAudioTrack(
       AudioAttributes.Builder()
@@ -716,17 +746,45 @@ class RealtimeAudio(
   /// and WebRtcApm as needed.
   private fun setRecorderEnabled(enabled: Boolean) {
     if (enabled == isRecorderEnabled) return
-    isRecorderEnabled = enabled
 
     if (enabled) {
-      // Create recorder + APM
-      echoDecision = decideEchoPath(recorderEnabled = true)
-      if (echoDecision.communicationMode) voiceCallSession.enter()
-      recorder = getRecorder(echoDecision.captureSource)
-      setupEchoControl()
+      var decision = decideEchoPath(recorderEnabled = true)
+      val commActive = if (decision.communicationMode) voiceCallSession.enter() else true
+      // A hardware AEC without an established voice-call context, or over a
+      // playback track built on the media path (engine constructed
+      // recorder-disabled), has no far-end reference — take the software
+      // path instead, whose renderTap-fed AEC3 is routing-independent.
+      if (decision.attachHardwareAec && (!commActive || !playbackOnVoicePath)) {
+        decision = decideEchoPath(recorderEnabled = true, hardwareAecAvailable = false)
+      }
+      echoDecision = decision
+      try {
+        recorder = getRecorder(decision.captureSource)
+        setupEchoControl()
+      } catch (e: Throwable) {
+        // Roll back to the DISABLED posture so a later retry re-attempts.
+        // Committing `isRecorderEnabled` before the fallible work wedged the
+        // engine permanently on a transient AudioRecord failure: the toggle
+        // guard turned every retry into a no-op over a null recorder (dead
+        // mic for the engine's life — adversarial review D1). The comm
+        // session stays held, matching the disabled posture; dispose() owns
+        // its release.
+        runCatching { recorder?.release() }
+        recorder = null
+        recorderData = null
+        captureProvenLive = false
+        releaseHardwareEffects()
+        webRtcApm?.release()
+        webRtcApm = null
+        audioTrack.renderTap = null
+        renderFeeder = null
+        throw e
+      }
+      isRecorderEnabled = true
       attachRenderTapIfNeeded()
       if (isRunning) startRecording()
     } else {
+      isRecorderEnabled = false
       // Release recorder + hardware effects + APM, leave the voice-call
       // audio-manager state (a playback tail may still be draining and the
       // recorder can come right back — recoverRecorder(); dispose() exits it).

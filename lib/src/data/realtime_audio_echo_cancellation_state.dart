@@ -33,8 +33,10 @@ abstract class RealtimeAudioEchoCancellationState
     @Default(false) bool captureProvenLive,
 
     /// The software APM's measured echo-return-loss-enhancement (dB), when it
-    /// reports one. Null on the platform mechanism, on AECM, and before the
-    /// canceller has converged.
+    /// reports one. Null on the platform mechanism and on AECM; AEC3 reports
+    /// from its first processed block (~0 dB while unconverged), so presence
+    /// alone is instantiation evidence — the trust predicate demands the
+    /// converged threshold.
     double? erleDb,
 
     /// `aec3` | `aecm` while the software APM runs; null otherwise.
