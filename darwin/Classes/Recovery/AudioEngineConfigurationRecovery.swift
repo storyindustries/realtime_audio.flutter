@@ -46,6 +46,19 @@ enum AudioEngineConfigurationRecovery {
     }
     resumePreservedPlayback()
   }
+
+  /// Explicitly drives the player after an engine restart. AVAudioPlayerNode
+  /// may continue reporting `isPlaying == true` while its engine is stopped,
+  /// so that signal must not suppress the resume.
+  static func resumePreservedPlayback(
+    shouldRestart: Bool,
+    shouldBePaused: Bool,
+    hasQueuedAudio: Bool,
+    play: () -> Void
+  ) {
+    guard shouldRestart, !shouldBePaused, hasQueuedAudio else { return }
+    play()
+  }
 }
 
 enum PlaybackWedgeRecoveryDecision: Equatable {

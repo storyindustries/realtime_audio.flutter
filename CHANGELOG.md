@@ -1,3 +1,17 @@
+## 0.0.17
+
+* Fix intermittent iOS call startup by removing the incompatible combination
+  of `.voiceChat` and the iOS 18.2 session echo-input preference. Voice calls
+  now use VoiceProcessingIO exactly once on the input node; the output node is
+  never toggled.
+* Run every engine instance and dictionary mutation on one serial background
+  executor so AVAudioSession setup cannot block Flutter's platform thread and
+  teardown cannot race configuration recovery.
+* Make recorder toggles transactional and restore the previous native graph
+  when reconfiguration fails.
+* Report AVAudioSession `!pri` (`561017449`) as the stable, recoverable
+  `audio_session_insufficient_priority` platform error.
+
 ## 0.0.16
 
 * Android root-cause echo overhaul (2026-07-24 RCA — the cascade heard

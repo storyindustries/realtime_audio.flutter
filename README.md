@@ -166,15 +166,35 @@ final aec = await audio.getEchoCancellationState();
 // aec.trustsFullDuplex   — requested && nativeEnabled && captureProvenLive
 ```
 
-- **iOS / macOS**: AEC is Apple's `AVAudioEngine` VoiceProcessingIO (a
-  `platformAec`); `nativeEnabled` reads back `AVAudioInputNode.isVoiceProcessingEnabled`
-  after enabling it. The bundled WebRTC APM does NS+AGC only here.
+- **iOS**: input-node VoiceProcessingIO supplies AEC and its enabled state is
+  read back from `AVAudioInputNode.isVoiceProcessingEnabled`. The output node
+  is never toggled, and the separate iOS 18.2 session echo-input preference is
+  not requested because it is invalid with `.voiceChat`. The bundled WebRTC
+  APM does NS+AGC only here.
+- **macOS**: no platform AEC path is currently claimed; consumers receive the
+  conservative no-AEC read-back.
 - **Android**: AEC is the bundled WebRTC APM (`webrtcApm`) when available;
   otherwise the engine relies on the platform `VOICE_COMMUNICATION` capture
   source (`platformAec`), whose liveness cannot be read back (`nativeEnabled` is
   then `false`).
 
 ## 🩺 Audio-engine health
+
+On iOS, `audio_session_insufficient_priority` is a stable, recoverable platform
+error: another call or app currently owns a higher-priority audio session.
+Retry after the interruption ends; do not present it as a network failure.
+
+The repeated iOS lifecycle gate exercises 20 create → start → first live mic
+frame → dispose cycles and bounds main-runloop stalls:
+
+```sh
+cd example
+flutter test integration_test/ios_audio_lifecycle_test.dart -d <ios-device>
+```
+
+A physical iOS device is authoritative for AVAudioSession priority, routes, and
+live microphone frames. A simulator run is only a compile, lifecycle, and
+main-runloop smoke test.
 
 iOS and macOS can stop an audio engine after a real route or format change. The
 plugin restarts that stopped engine without stopping the player, preserving any

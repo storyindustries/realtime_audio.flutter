@@ -48,9 +48,7 @@ class RealtimeAudio {
     this.playerProgressInterval = 10,
     this.playerVolumeInterval = 40,
     this.recorderChunkInterval = 40,
-  }) {
-    isInitialized = _initialize();
-  }
+  });
 
   final bool voiceProcessing;
   final bool recorderEnabled;
@@ -62,9 +60,12 @@ class RealtimeAudio {
   final int playerVolumeInterval;
   final int recorderChunkInterval;
 
-  late final Future<void> isInitialized;
+  Future<void>? _initialization;
+  Future<void> get isInitialized => _initialization ??= _initialize();
 
-  static const _staticChannel = MethodChannel('dev.volskaya.RealtimeAudio/plugin');
+  static const _staticChannel = MethodChannel(
+    'dev.volskaya.RealtimeAudio/plugin',
+  );
   static const _uuid = Uuid();
 
   static bool _isFirstCreate = true;
@@ -73,12 +74,18 @@ class RealtimeAudio {
   final List<RealtimeAudioQueueEntry> _queue = [];
   final Set<String> _queuedChunks = {};
 
-  final StreamController<double> _playerVolumeStreamController = StreamController<double>();
-  final StreamController<double> _recorderVolumeStreamController = StreamController<double>();
-  final StreamController<Uint8List> _recorderStreamController = StreamController<Uint8List>();
-  final StreamController<RealtimeAudioState> _stateStreamController = StreamController<RealtimeAudioState>();
-  final StreamController<String> _recorderErrorStreamController = StreamController<String>.broadcast();
-  final StreamController<RealtimeAudioEngineHealthEvent> _engineHealthStreamController =
+  final StreamController<double> _playerVolumeStreamController =
+      StreamController<double>();
+  final StreamController<double> _recorderVolumeStreamController =
+      StreamController<double>();
+  final StreamController<Uint8List> _recorderStreamController =
+      StreamController<Uint8List>();
+  final StreamController<RealtimeAudioState> _stateStreamController =
+      StreamController<RealtimeAudioState>();
+  final StreamController<String> _recorderErrorStreamController =
+      StreamController<String>.broadcast();
+  final StreamController<RealtimeAudioEngineHealthEvent>
+  _engineHealthStreamController =
       StreamController<RealtimeAudioEngineHealthEvent>.broadcast();
 
   Stream<Uint8List> get recorderStream => _recorderStreamController.stream;
@@ -88,15 +95,18 @@ class RealtimeAudio {
   Stream<double> get playerVolumeStream => _playerVolumeStreamController.stream;
 
   /// Recorder volume in dBFS, clamped from -96 to 0.
-  Stream<double> get recorderVolumeStream => _recorderVolumeStreamController.stream;
+  Stream<double> get recorderVolumeStream =>
+      _recorderVolumeStreamController.stream;
 
   /// Native recorder errors (e.g. AVAudioConverter failures, Android
   /// AudioRecord state errors). Broadcast so it can be subscribed to
   /// independently of the recorder data stream.
-  Stream<String> get recorderErrorStream => _recorderErrorStreamController.stream;
+  Stream<String> get recorderErrorStream =>
+      _recorderErrorStreamController.stream;
 
   /// Native audio-engine configuration and recovery outcomes.
-  Stream<RealtimeAudioEngineHealthEvent> get engineHealthStream => _engineHealthStreamController.stream;
+  Stream<RealtimeAudioEngineHealthEvent> get engineHealthStream =>
+      _engineHealthStreamController.stream;
 
   String? _id;
   MethodChannel? _channel;
@@ -107,14 +117,18 @@ class RealtimeAudio {
 
   static Future<RealtimeAudioRecordPermission> getRecordPermission() async {
     final RealtimeAudioResponseGetRecordPermission response =
-        await const RealtimeAudioArguments.getRecordPermission().invoke(_staticChannel);
+        await const RealtimeAudioArguments.getRecordPermission().invoke(
+          _staticChannel,
+        );
 
     return response.permission;
   }
 
   static Future<RealtimeAudioRecordPermission> requestRecordPermission() async {
     final RealtimeAudioResponseRequestRecordPermission response =
-        await const RealtimeAudioArguments.requestRecordPermission().invoke(_staticChannel);
+        await const RealtimeAudioArguments.requestRecordPermission().invoke(
+          _staticChannel,
+        );
 
     return response.permission;
   }
@@ -154,7 +168,9 @@ class RealtimeAudio {
         _recorderStreamController.sink.add(call.arguments as Uint8List);
         break;
       case 'recorderError':
-        final message = call.arguments is String ? call.arguments as String : '${call.arguments}';
+        final message = call.arguments is String
+            ? call.arguments as String
+            : '${call.arguments}';
         if (kDebugMode) {
           print("RealtimeAudio recorderError: $message"); // ignore: avoid_print
         }
@@ -165,7 +181,9 @@ class RealtimeAudio {
       case 'audioEngineHealth':
         final arguments = Map<String, dynamic>.from(call.arguments as Map);
         if (!_engineHealthStreamController.isClosed) {
-          _engineHealthStreamController.sink.add(RealtimeAudioEngineHealthEvent.fromMap(arguments));
+          _engineHealthStreamController.sink.add(
+            RealtimeAudioEngineHealthEvent.fromMap(arguments),
+          );
         }
         break;
       case 'chunkQueued':
@@ -178,7 +196,9 @@ class RealtimeAudio {
         handleChunkPlayed(call.arguments as String);
         break;
       default:
-        print("Unimplemented call: ${call.method} with args: ${call.arguments}."); // ignore: avoid_print
+        debugPrint(
+          "Unimplemented call: ${call.method} with args: ${call.arguments}.",
+        );
     }
   }
 
@@ -207,13 +227,18 @@ class RealtimeAudio {
     if (!_queuedChunks.contains(id)) return;
 
     assert(
-      _queue.firstWhereOrNull((v) => v.mapOrNull(chunk: (v) => v.id == id) == true) != null,
+      _queue.firstWhereOrNull(
+            (v) => v.mapOrNull(chunk: (v) => v.id == id) == true,
+          ) !=
+          null,
       "Chunk $id not found in queue.",
     );
     assert(
       (() {
         final firstChunkId = _queue
-            .firstWhereOrNull((v) => v.mapOrNull(chunk: (v) => v.id == id) == true) //
+            .firstWhereOrNull(
+              (v) => v.mapOrNull(chunk: (v) => v.id == id) == true,
+            ) //
             ?.mapOrNull(chunk: (v) => v.id);
 
         return firstChunkId == id;
@@ -236,13 +261,18 @@ class RealtimeAudio {
     if (!_queuedChunks.contains(id)) return;
 
     assert(
-      _queue.firstWhereOrNull((v) => v.mapOrNull(chunk: (v) => v.id == id) == true) != null,
+      _queue.firstWhereOrNull(
+            (v) => v.mapOrNull(chunk: (v) => v.id == id) == true,
+          ) !=
+          null,
       "Chunk $id not found in queue.",
     );
     assert(
       (() {
         final firstChunkId = _queue
-            .firstWhereOrNull((v) => v.mapOrNull(chunk: (v) => v.id == id) == true) //
+            .firstWhereOrNull(
+              (v) => v.mapOrNull(chunk: (v) => v.id == id) == true,
+            ) //
             ?.mapOrNull(chunk: (v) => v.id);
 
         return firstChunkId == id;
@@ -257,8 +287,12 @@ class RealtimeAudio {
     while (_queue.isNotEmpty && !isChunkAfterTargetFound) {
       final entry = _queue.first;
 
-      isChunkAfterTargetFound = isTargetIdFound && entry.mapOrNull(chunk: (_) => true) == true;
-      isTargetIdFound = isTargetIdFound || isChunkAfterTargetFound || entry.mapOrNull(chunk: (v) => v.id == id) == true;
+      isChunkAfterTargetFound =
+          isTargetIdFound && entry.mapOrNull(chunk: (_) => true) == true;
+      isTargetIdFound =
+          isTargetIdFound ||
+          isChunkAfterTargetFound ||
+          entry.mapOrNull(chunk: (v) => v.id == id) == true;
 
       if (isChunkAfterTargetFound) break;
       handleQueueEntry(entry);
@@ -281,7 +315,10 @@ class RealtimeAudio {
       _queuedChunks.add(effectiveId);
 
       try {
-        await _channel!.invokeMethod('queue', {'id': effectiveId, 'data': data});
+        await _channel!.invokeMethod('queue', {
+          'id': effectiveId,
+          'data': data,
+        });
       } catch (_) {
         _queue.removeWhere((v) => v == queueEntry);
         rethrow;
@@ -290,17 +327,15 @@ class RealtimeAudio {
   }
 
   void queueCallback(void Function() callback) => _semaphore.withLock(() {
-        final queueEntry = RealtimeAudioQueueEntry.callback(callback: callback);
-        _queue.add(queueEntry);
-      });
+    final queueEntry = RealtimeAudioQueueEntry.callback(callback: callback);
+    _queue.add(queueEntry);
+  });
 
   Future<T?> _withInitAndLock<T>(Future<T?> Function() fn) async {
     await _semaphore.acquire();
     try {
       await isInitialized;
-    } catch (_) {} // Ignore.
-    if (_isDisposed) return null;
-    try {
+      if (_isDisposed) return null;
       return await fn();
     } finally {
       _semaphore.release();
@@ -309,12 +344,21 @@ class RealtimeAudio {
 
   //
 
-  Future<void> start() => _withInitAndLock(() async => _channel?.invokeMethod('start'));
-  Future<void> pause() => _withInitAndLock(() async => _channel?.invokeMethod('pause'));
-  Future<void> resume() => _withInitAndLock(() async => _channel?.invokeMethod('resume'));
-  Future<void> stop() async => _withInitAndLock(() async => _channel?.invokeMethod('stop'));
-  Future<RealtimeAudioInstanceResponseClearQueue?> clearQueue() => _withInitAndLock(
-      () async => _channel?.invokeMethodData('clearQueue', RealtimeAudioInstanceResponseClearQueue.fromJson));
+  Future<void> start() =>
+      _withInitAndLock(() async => _channel?.invokeMethod('start'));
+  Future<void> pause() =>
+      _withInitAndLock(() async => _channel?.invokeMethod('pause'));
+  Future<void> resume() =>
+      _withInitAndLock(() async => _channel?.invokeMethod('resume'));
+  Future<void> stop() async =>
+      _withInitAndLock(() async => _channel?.invokeMethod('stop'));
+  Future<RealtimeAudioInstanceResponseClearQueue?> clearQueue() =>
+      _withInitAndLock(
+        () async => _channel?.invokeMethodData(
+          'clearQueue',
+          RealtimeAudioInstanceResponseClearQueue.fromJson,
+        ),
+      );
 
   /// Synchronously read the player's completion-independent render clock.
   ///
@@ -323,8 +367,13 @@ class RealtimeAudio {
   /// playback-head clock rather than per-buffer completion callbacks. See
   /// [RealtimeAudioPlaybackClock] for the reset semantics. Also mirrored on the
   /// [stateStream] as [RealtimeAudioState.renderedMs] / [RealtimeAudioState.isRendering].
-  Future<RealtimeAudioPlaybackClock?> getPlayerPlayedDuration() => _withInitAndLock(
-      () async => _channel?.invokeMethodData('getPlayerPlayedDuration', RealtimeAudioPlaybackClock.fromJson));
+  Future<RealtimeAudioPlaybackClock?> getPlayerPlayedDuration() =>
+      _withInitAndLock(
+        () async => _channel?.invokeMethodData(
+          'getPlayerPlayedDuration',
+          RealtimeAudioPlaybackClock.fromJson,
+        ),
+      );
 
   /// Clear stranded completion accounting after the caller has proven, from
   /// per-stream render-clock deltas, that the snapshotted scheduled extent was
@@ -332,45 +381,63 @@ class RealtimeAudio {
   /// audio was queued. This never stops the player or discards scheduled PCM.
   Future<RealtimeAudioPlaybackAccountingRepair?> repairPlaybackAccounting({
     required int expectedScheduledMs,
-  }) =>
-      _withInitAndLock(
-        () async => _channel?.invokeMethodData(
-          'repairPlaybackAccounting',
-          RealtimeAudioPlaybackAccountingRepair.fromMap,
-          {'expectedScheduledMs': expectedScheduledMs},
-        ),
-      );
+  }) => _withInitAndLock(
+    () async => _channel?.invokeMethodData(
+      'repairPlaybackAccounting',
+      RealtimeAudioPlaybackAccountingRepair.fromMap,
+      {'expectedScheduledMs': expectedScheduledMs},
+    ),
+  );
 
   /// Destructively discard a playback wedge and restore player readiness.
   /// Unlike [repairPlaybackAccounting], this intentionally stops the player.
-  Future<RealtimeAudioPlaybackWedgeRecovery?> recoverWedgedPlayback() => _withInitAndLock(
-      () async =>
-          _channel?.invokeMethodData('recoverWedgedPlayback', RealtimeAudioPlaybackWedgeRecovery.fromMap));
+  Future<RealtimeAudioPlaybackWedgeRecovery?> recoverWedgedPlayback() =>
+      _withInitAndLock(
+        () async => _channel?.invokeMethodData(
+          'recoverWedgedPlayback',
+          RealtimeAudioPlaybackWedgeRecovery.fromMap,
+        ),
+      );
 
   /// Read back whether echo cancellation is actually active for the current
   /// capture path (never assumed), plus whether mic capture has proven live.
   ///
   /// Use [RealtimeAudioEchoCancellationState.trustsFullDuplex] to decide whether
   /// full-duplex (talk-over) can be trusted.
-  Future<RealtimeAudioEchoCancellationState?> getEchoCancellationState() => _withInitAndLock(
-      () async => _channel?.invokeMethodData('getEchoCancellationState', RealtimeAudioEchoCancellationState.fromJson));
+  Future<RealtimeAudioEchoCancellationState?> getEchoCancellationState() =>
+      _withInitAndLock(
+        () async => _channel?.invokeMethodData(
+          'getEchoCancellationState',
+          RealtimeAudioEchoCancellationState.fromJson,
+        ),
+      );
 
   /// Dynamically toggle the recorder (and voice processing / AEC) without
   /// disposing the engine. The native side reconfigures the audio session
   /// and restarts the engine internally.
-  Future<void> setRecorderEnabled(bool enabled) =>
-      _withInitAndLock(() async => _channel?.invokeMethod('setRecorderEnabled', {'enabled': enabled}));
+  Future<void> setRecorderEnabled(bool enabled) => _withInitAndLock(
+    () async =>
+        _channel?.invokeMethod('setRecorderEnabled', {'enabled': enabled}),
+  );
 
   //
 
-  Future<void> stopBackground() => _withInitAndLock(() async => _channel?.invokeMethod('stopBackground'));
-  Future<void> playBackground(Uint8List data, {bool loop = false}) => _withInitAndLock(
-      () async => _channel?.invokeMethod('playBackground', {'id': _uuid.v4(), 'data': data, 'loop': loop}));
+  Future<void> stopBackground() =>
+      _withInitAndLock(() async => _channel?.invokeMethod('stopBackground'));
+  Future<void> playBackground(Uint8List data, {bool loop = false}) =>
+      _withInitAndLock(
+        () async => _channel?.invokeMethod('playBackground', {
+          'id': _uuid.v4(),
+          'data': data,
+          'loop': loop,
+        }),
+      );
 
   //
 
-  Future<void> _initialize() => _semaphore.withLock(() async {
-        final RealtimeAudioResponseCreate response = await RealtimeAudioArguments.create(
+  Future<void> _initialize() async {
+    final RealtimeAudioResponseCreate response =
+        await RealtimeAudioArguments.create(
           isFirstCreate: _isFirstCreate,
           voiceProcessing: voiceProcessing,
           recorderEnabled: recorderEnabled,
@@ -383,28 +450,41 @@ class RealtimeAudio {
           recorderChunkInterval: recorderChunkInterval,
         ).invoke(_staticChannel);
 
-        _isFirstCreate = false;
-        _id = response.id;
-        _channel = MethodChannel('dev.volskaya.RealtimeAudio/engines/$_id');
-        _channel!.setMethodCallHandler(_handleChannel);
-      });
+    _isFirstCreate = false;
+    _id = response.id;
+    _channel = MethodChannel('dev.volskaya.RealtimeAudio/engines/$_id');
+    _channel!.setMethodCallHandler(_handleChannel);
+  }
 
-  Future<void> dispose() => _withInitAndLock(() async {
-        _channel?.setMethodCallHandler(null);
-        _isDisposed = true;
-        _recorderVolumeStreamController.close();
-        _recorderVolumeStreamController.sink.close();
-        _playerVolumeStreamController.close();
-        _playerVolumeStreamController.sink.close();
-        _recorderStreamController.close();
-        _recorderStreamController.sink.close();
-        _recorderErrorStreamController.close();
-        _recorderErrorStreamController.sink.close();
-        _engineHealthStreamController.close();
-        _engineHealthStreamController.sink.close();
-        _stateStreamController.close();
-        _stateStreamController.sink.close();
-        if (_id != null) await RealtimeAudioArguments.destroy(id: _id!).invoke(_staticChannel);
-        _id = null;
-      });
+  Future<void> dispose() async {
+    await _semaphore.acquire();
+    try {
+      // A failed create has no native instance to destroy, but Dart stream
+      // resources still need deterministic cleanup.
+      try {
+        await isInitialized;
+      } catch (_) {}
+      if (_isDisposed) return;
+      _channel?.setMethodCallHandler(null);
+      _isDisposed = true;
+      _recorderVolumeStreamController.close();
+      _recorderVolumeStreamController.sink.close();
+      _playerVolumeStreamController.close();
+      _playerVolumeStreamController.sink.close();
+      _recorderStreamController.close();
+      _recorderStreamController.sink.close();
+      _recorderErrorStreamController.close();
+      _recorderErrorStreamController.sink.close();
+      _engineHealthStreamController.close();
+      _engineHealthStreamController.sink.close();
+      _stateStreamController.close();
+      _stateStreamController.sink.close();
+      if (_id != null) {
+        await RealtimeAudioArguments.destroy(id: _id!).invoke(_staticChannel);
+      }
+      _id = null;
+    } finally {
+      _semaphore.release();
+    }
+  }
 }

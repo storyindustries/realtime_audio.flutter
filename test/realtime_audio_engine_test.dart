@@ -11,6 +11,13 @@ void main() {
       TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
 
   group('data model decoding', () {
+    test('insufficient-priority platform error code is stable', () {
+      expect(
+        RealtimeAudioErrorCode.audioSessionInsufficientPriority,
+        'audio_session_insufficient_priority',
+      );
+    });
+
     test('RealtimeAudioState decodes the additive render-clock fields', () {
       final state = RealtimeAudioState.fromJson(const {
         'isPlaying': false,
@@ -190,7 +197,8 @@ void main() {
         'nativeEnabled': true,
         'mechanism': 'webrtc_apm',
         'captureProvenLive': true,
-        'erleDb': RealtimeAudioEchoCancellationState.erleTrustThresholdDb - 0.001,
+        'erleDb':
+            RealtimeAudioEchoCancellationState.erleTrustThresholdDb - 0.001,
       });
       expect(justBelow.trustsFullDuplex, false);
 
@@ -279,6 +287,34 @@ void main() {
       expect(wedge.recovered, false);
       expect(wedge.message, 'engine restart failed');
     });
+  });
+
+  test('start preserves a typed native create failure', () async {
+    messenger.setMockMethodCallHandler(_pluginChannel, (call) async {
+      if (call.method == 'create') {
+        throw PlatformException(
+          code: RealtimeAudioErrorCode.audioSessionInsufficientPriority,
+          message: 'Another call owns audio',
+        );
+      }
+      return null;
+    });
+    final audio = RealtimeAudio(recorderEnabled: true);
+    addTearDown(() async {
+      await audio.dispose();
+      messenger.setMockMethodCallHandler(_pluginChannel, null);
+    });
+
+    await expectLater(
+      audio.start(),
+      throwsA(
+        isA<PlatformException>().having(
+          (error) => error.code,
+          'code',
+          RealtimeAudioErrorCode.audioSessionInsufficientPriority,
+        ),
+      ),
+    );
   });
 
   group('method channel round-trips', () {

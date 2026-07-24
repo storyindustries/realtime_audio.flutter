@@ -3,6 +3,7 @@ import AVFoundation
 class ChunkAudioPlayerNode: AVAudioPlayerNode {
   private var inputFormat: AVAudioFormat
   private var outputFormat: AVAudioFormat
+  private let callbackQueue: DispatchQueue
 
   var queue: [ChunkEntry] = []
   var totalSampleTime: UInt32 { queueTimeline.totalFrames }
@@ -65,10 +66,12 @@ class ChunkAudioPlayerNode: AVAudioPlayerNode {
 
   init(
     inputFormat: AVAudioFormat,
-    outputFormat: AVAudioFormat
+    outputFormat: AVAudioFormat,
+    callbackQueue: DispatchQueue = .main
   ) throws {
     self.inputFormat = inputFormat
     self.outputFormat = outputFormat
+    self.callbackQueue = callbackQueue
     self.converter = try PCMStreamConverter(inputFormat: inputFormat, outputFormat: outputFormat)
   }
 
@@ -92,7 +95,7 @@ class ChunkAudioPlayerNode: AVAudioPlayerNode {
     // `.dataPlayedBack` fires when the buffer has actually been played out (not
     // merely consumed), so completionRenderedMs tracks true playout.
     scheduleBuffer(entry.buffer, completionCallbackType: .dataPlayedBack) { [weak self] _ in
-      DispatchQueue.main.async { [weak self] in
+      self?.callbackQueue.async { [weak self] in
         guard let self else { return }
 
         // Count toward completion-driven rendered ms only if this buffer wasn't

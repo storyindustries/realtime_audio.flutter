@@ -16,12 +16,14 @@ class RealtimeAudio: NSObject {
   let id: String
   let arguments: CreateArguments
   let methodChannel: FlutterMethodChannel
+  private let nativeQueue: DispatchQueue
 
   private let recorderSampleRate: Double
   private let recorderFormat: AVAudioFormat
   private var recorderConverter: AVAudioConverter?
   private let recorderPreferredBus: AVAudioNodeBus = 0
   private var recorderActiveBus: AVAudioNodeBus?
+  private var recorderTapInstalled = false
   private var recorderHasPermission: Bool {
     RealtimeAudioPlugin.getRecordPermission() == .granted
   }
@@ -35,9 +37,10 @@ class RealtimeAudio: NSObject {
   private let audioMixerNode = AVAudioMixerNode()
   private var audioPlayerNode: ChunkAudioPlayerNode!
   private var audioBackgroundNode: LoopAudioPlayerNode?
+  private var audioCaptureStrategy: IOSAudioCaptureStrategy = .none
 
-  private var playerVolumeTimer: Timer?
-  private var playerProgressTimer: Timer?
+  private var playerVolumeTimer: DispatchSourceTimer?
+  private var playerProgressTimer: DispatchSourceTimer?
   private var state: RealtimeAudioState = .init(
     isPlaying: false,
     isPaused: false,
@@ -56,7 +59,13 @@ class RealtimeAudio: NSObject {
   /// Mutable override for recorder state — allows dynamic toggling without
   /// disposing the engine. `nil` means use `arguments.recorderEnabled`.
   private var _recorderEnabledOverride: Bool?
-  var isRecorderEnabled: Bool { _recorderEnabledOverride ?? arguments.recorderEnabled }
+  /// Transition-only intent. Native rebuilds can observe the target state
+  /// without publishing it as committed until every throwing operation passes.
+  private var pendingRecorderEnabled: Bool?
+  private var recorderStateIsUnknown = false
+  var isRecorderEnabled: Bool {
+    pendingRecorderEnabled ?? _recorderEnabledOverride ?? arguments.recorderEnabled
+  }
 
   #if os(iOS)
     /// WebRTC Audio Processing Module for software echo cancellation, noise
@@ -71,15 +80,18 @@ class RealtimeAudio: NSObject {
   private var configurationRecoveryIsRunning = false
   private var isDisposed = false
   private var isDeinitialized = false
+  private var observersAttached = false
 
   init(
     id: String,
     arguments: CreateArguments,
-    methodChannel: FlutterMethodChannel
+    methodChannel: FlutterMethodChannel,
+    nativeQueue: DispatchQueue
   ) throws {
     self.id = id
     self.arguments = arguments
     self.methodChannel = methodChannel
+    self.nativeQueue = nativeQueue
 
     self.recorderSampleRate = arguments.recorderSampleRate
     self.recorderFormat = getAudioFormat(.pcmFormatInt16, recorderSampleRate, 1)!
@@ -92,7 +104,7 @@ class RealtimeAudio: NSObject {
     //
 
     // Initialize WebRTC APM for noise suppression and AGC only (no AEC).
-    // Apple's VoiceProcessingIO handles echo cancellation at the hardware level.
+    // Apple platform audio handles echo cancellation at the hardware level.
     #if os(iOS)
       if arguments.voiceProcessing && isRecorderEnabled {
         initializeApm()
@@ -102,12 +114,16 @@ class RealtimeAudio: NSObject {
     // The route's sample rate is only authoritative after activation. Creating
     // the resampling nodes before this point can lock them to the stale idle
     // route rate and introduce a second conversion boundary on call start.
-    try audioSession.configure(recorderEnabled: isRecorderEnabled)
+    try audioSession.configure(
+      recorderEnabled: isRecorderEnabled,
+      voiceProcessingRequested: arguments.voiceProcessing
+    )
     try audioSession.activate()
+    audioCaptureStrategy = negotiateAudioCaptureStrategy(recorderEnabled: isRecorderEnabled)
     try createPlayerNodesForCurrentRoute()
     attachObservers()
     audioPlayerNode.setListener(self)
-    methodChannel.setMethodCallHandler(handleFlutterMethod)
+    installMethodCallHandler()
     try attachNodes()
 
     changeVolume()
@@ -125,10 +141,15 @@ class RealtimeAudio: NSObject {
     playerOutputFormat = outputFormat
     audioPlayerNode = try ChunkAudioPlayerNode(
       inputFormat: playerInputFormat,
-      outputFormat: outputFormat
+      outputFormat: outputFormat,
+      callbackQueue: nativeQueue
     )
     audioBackgroundNode = arguments.backgroundEnabled
-      ? try LoopAudioPlayerNode(inputFormat: playerInputFormat, outputFormat: outputFormat)
+      ? try LoopAudioPlayerNode(
+        inputFormat: playerInputFormat,
+        outputFormat: outputFormat,
+        callbackQueue: nativeQueue
+      )
       : nil
   }
 
@@ -137,8 +158,8 @@ class RealtimeAudio: NSObject {
     private var webRtcApmActive: Bool { webRtcApm?.isAvailable == true }
 
     /// Initialize the WebRTC APM for noise suppression and AGC only.
-    /// AEC is disabled — Apple's VoiceProcessingIO handles echo cancellation
-    /// at the hardware level with per-device acoustic models.
+    /// AEC is disabled — the selected Apple platform path handles echo
+    /// cancellation at the hardware level with per-device acoustic models.
     private func initializeApm() {
       let apm = WebRtcApm(
         captureSampleRate: Int(recorderSampleRate),
@@ -149,20 +170,14 @@ class RealtimeAudio: NSObject {
       )
       guard apm.isAvailable else { return }
       webRtcApm = apm
-      methodChannel.invokeMethod("echo", arguments: "WebRTC APM initialized (NS + AGC only, Apple VP handles AEC)")
+      invokeFlutter(
+        "echo",
+        arguments: "WebRTC APM initialized (NS + AGC only, Apple platform audio handles AEC)"
+      )
     }
   #endif
 
   private func attachNodes() throws {
-    #if os(iOS)
-      if isRecorderEnabled {
-        // Apple's VoiceProcessingIO handles AEC at the hardware level.
-        try audioEngine.outputNode.setVoiceProcessingEnabled(true)
-        try audioEngine.inputNode.setVoiceProcessingEnabled(true)
-        audioEngine.inputNode.isVoiceProcessingAGCEnabled = false
-      }
-    #endif
-
     // Might need this later.
     let equalizer = AVAudioUnitEQ(numberOfBands: 2)
     equalizer.bypass = true
@@ -181,11 +196,53 @@ class RealtimeAudio: NSObject {
 
     audioEngine.connect(audioMixerNode, to: audioEngine.mainMixerNode, format: nil)
     audioEngine.connect(audioEngine.mainMixerNode, to: audioEngine.outputNode, format: nil)
+
+    try applyVoiceProcessingStrategy()
+  }
+
+  private func applyVoiceProcessingStrategy() throws {
+    #if os(iOS)
+      let shouldEnable = audioCaptureStrategy == .inputVoiceProcessing
+      if audioEngine.inputNode.isVoiceProcessingEnabled != shouldEnable {
+        // VoiceProcessingIO is one shared I/O unit: enabling either node
+        // enables both. Input-only avoids the output-node initialization path
+        // that produced silent graphs and main-thread stalls on device.
+        try audioEngine.inputNode.setVoiceProcessingEnabled(shouldEnable)
+      }
+      if shouldEnable {
+        audioEngine.inputNode.isVoiceProcessingAGCEnabled = false
+      }
+    #endif
+  }
+
+  private func negotiateAudioCaptureStrategy(recorderEnabled: Bool) -> IOSAudioCaptureStrategy {
+    #if os(iOS)
+      return IOSAudioCapturePolicy.strategy(
+        recorderEnabled: recorderEnabled,
+        voiceProcessingRequested: arguments.voiceProcessing
+      )
+    #else
+      return .none
+    #endif
   }
 
   private func attachObservers() {
+    guard !observersAttached else { return }
+    observersAttached = true
     #if os(iOS)
       audioSession.instance.addObserver(self, forKeyPath: "outputVolume", options: .new, context: nil)
+      NotificationCenter.default.addObserver(
+        self,
+        selector: #selector(handleAudioRouteChange),
+        name: AVAudioSession.routeChangeNotification,
+        object: audioSession.instance
+      )
+      NotificationCenter.default.addObserver(
+        self,
+        selector: #selector(handleAudioSessionInterruption),
+        name: AVAudioSession.interruptionNotification,
+        object: audioSession.instance
+      )
     #endif
     NotificationCenter.default.addObserver(
       self,
@@ -195,46 +252,139 @@ class RealtimeAudio: NSObject {
     )
   }
 
+  private func detachObservers() {
+    guard observersAttached else { return }
+    observersAttached = false
+    NotificationCenter.default.removeObserver(self)
+    #if os(iOS)
+      audioSession.instance.removeObserver(self, forKeyPath: "outputVolume")
+    #endif
+  }
+
+  /// Flutter's binary messenger owns handler registration on the platform
+  /// task runner even when engine construction itself runs on a background
+  /// task queue.
+  private func installMethodCallHandler() {
+    let install = { [self] in
+      methodChannel.setMethodCallHandler { [weak self] call, result in
+        guard let self else {
+          result(FlutterError(code: "INTERNAL", message: "Audio engine disposed.", details: nil))
+          return
+        }
+        let resultOnPlatformThread: FlutterResult = { value in
+          if Thread.isMainThread {
+            result(value)
+          } else {
+            DispatchQueue.main.async {
+              result(value)
+            }
+          }
+        }
+        nativeQueue.async { [weak self] in
+          guard let self, !isDisposed else {
+            resultOnPlatformThread(
+              FlutterError(code: "INTERNAL", message: "Audio engine disposed.", details: nil)
+            )
+            return
+          }
+          handleFlutterMethod(call: call, result: resultOnPlatformThread)
+        }
+      }
+    }
+    if Thread.isMainThread {
+      install()
+    } else {
+      DispatchQueue.main.sync(execute: install)
+    }
+  }
+
+  private func clearMethodCallHandler() {
+    let clear = { [methodChannel] in
+      methodChannel.setMethodCallHandler(nil)
+    }
+    if Thread.isMainThread {
+      clear()
+    } else {
+      DispatchQueue.main.sync(execute: clear)
+    }
+  }
+
   @objc private func handleAudioEngineConfigurationChange(notification: NSNotification) {
-    DispatchQueue.main.async { [weak self] in
-      guard let self else { return }
-      let engineWasRunning = audioEngine.isRunning
-      let decision = AudioEngineConfigurationRecoveryPolicy.decide(
-        shouldBeStarted: shouldBeStarted,
-        shouldBePaused: shouldBePaused,
-        engineIsRunning: engineWasRunning,
-        recoveryIsRunning: configurationRecoveryIsRunning
-      )
+    nativeQueue.async { [weak self] in
+      self?.recoverAfterAudioConfigurationChange()
+    }
+  }
 
-      switch decision {
-      case .ignoreInactiveEngine, .ignoreRecoveryInProgress:
+  #if os(iOS)
+    @objc private func handleAudioRouteChange(notification: NSNotification) {
+      nativeQueue.async { [weak self] in
+        guard let self, !isDisposed else { return }
+        audioCaptureStrategy = negotiateAudioCaptureStrategy(recorderEnabled: isRecorderEnabled)
+      }
+    }
+
+    @objc private func handleAudioSessionInterruption(notification: NSNotification) {
+      guard
+        let rawType = notification.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt,
+        AVAudioSession.InterruptionType(rawValue: rawType) == .ended
+      else {
         return
-      case .ignoreHealthyEngine:
-        notifyEngineHealth(
-          type: "configuration_change_ignored_healthy",
-          engineWasRunning: engineWasRunning
-        )
-      case .restartStoppedEnginePreservingPlayback:
-        configurationRecoveryIsRunning = true
-        notifyEngineHealth(
-          type: "configuration_change_recovery_started",
-          engineWasRunning: engineWasRunning
-        )
-        defer { configurationRecoveryIsRunning = false }
-
+      }
+      nativeQueue.async { [weak self] in
+        guard let self, !isDisposed else { return }
         do {
-          try recoverStoppedEnginePreservingPlayback()
-          notifyEngineHealth(
-            type: "configuration_change_recovered",
-            engineWasRunning: engineWasRunning
-          )
+          try audioSession.activate()
+          recoverAfterAudioConfigurationChange()
         } catch {
           notifyEngineHealth(
-            type: "configuration_change_recovery_failed",
-            engineWasRunning: engineWasRunning,
-            message: "recovery_failed"
+            type: "interruption_recovery_failed",
+            engineWasRunning: audioEngine.isRunning,
+            message: "session_activation_failed"
           )
         }
+      }
+    }
+  #endif
+
+  private func recoverAfterAudioConfigurationChange() {
+    guard !isDisposed else { return }
+    audioCaptureStrategy = negotiateAudioCaptureStrategy(recorderEnabled: isRecorderEnabled)
+    let engineWasRunning = audioEngine.isRunning
+    let decision = AudioEngineConfigurationRecoveryPolicy.decide(
+      shouldBeStarted: shouldBeStarted,
+      shouldBePaused: shouldBePaused,
+      engineIsRunning: engineWasRunning,
+      recoveryIsRunning: configurationRecoveryIsRunning
+    )
+
+    switch decision {
+    case .ignoreInactiveEngine, .ignoreRecoveryInProgress:
+      return
+    case .ignoreHealthyEngine:
+      notifyEngineHealth(
+        type: "configuration_change_ignored_healthy",
+        engineWasRunning: engineWasRunning
+      )
+    case .restartStoppedEnginePreservingPlayback:
+      configurationRecoveryIsRunning = true
+      notifyEngineHealth(
+        type: "configuration_change_recovery_started",
+        engineWasRunning: engineWasRunning
+      )
+      defer { configurationRecoveryIsRunning = false }
+
+      do {
+        try recoverStoppedEnginePreservingPlayback()
+        notifyEngineHealth(
+          type: "configuration_change_recovered",
+          engineWasRunning: engineWasRunning
+        )
+      } catch {
+        notifyEngineHealth(
+          type: "configuration_change_recovery_failed",
+          engineWasRunning: engineWasRunning,
+          message: "recovery_failed"
+        )
       }
     }
   }
@@ -254,7 +404,7 @@ class RealtimeAudio: NSObject {
     if let message { event["message"] = message }
     if let outputRoute { event["outputRoute"] = outputRoute }
     if let outputSampleRate { event["outputSampleRate"] = outputSampleRate }
-    methodChannel.invokeMethod("audioEngineHealth", arguments: event)
+    invokeFlutter("audioEngineHealth", arguments: event)
   }
 
   /// Rebuild only the capture tap after a system-driven engine stop. Calling
@@ -265,20 +415,21 @@ class RealtimeAudio: NSObject {
       reinstallCapture: { try installTap() },
       startEngine: { try audioEngine.start() },
       removeCaptureAfterFailure: {
-        if isRecorderEnabled {
-          audioEngine.inputNode.removeTap(onBus: recorderPreferredBus)
-        }
+        removeRecorderTap()
       },
       resumePreservedPlayback: {
         playBackground()
-
-        guard !shouldBePaused, !audioPlayerNode.queue.isEmpty else { return }
-        changeVolume()
-        // The engine may stop while the player still reports `isPlaying`; drive
-        // it explicitly so the preserved buffers resume rendering.
-        audioPlayerNode.play()
-        attachTimers()
-        notifyPlayerState(isPaused: false)
+        AudioEngineConfigurationRecovery.resumePreservedPlayback(
+          shouldRestart: true,
+          shouldBePaused: shouldBePaused,
+          hasQueuedAudio: !audioPlayerNode.queue.isEmpty,
+          play: {
+            changeVolume()
+            audioPlayerNode.play()
+            attachTimers()
+            notifyPlayerState(isPaused: false)
+          }
+        )
       }
     )
   }
@@ -292,36 +443,46 @@ class RealtimeAudio: NSObject {
 
   deinit {
     isDeinitialized = true
+    guard !isDisposed else { return }
 
+    detachObservers()
     #if os(iOS)
-      audioSession.instance.removeObserver(self, forKeyPath: "outputVolume")
-      audioEngine.inputNode.removeTap(onBus: recorderPreferredBus)
+      removeRecorderTap()
       webRtcApm?.release()
       webRtcApm = nil
     #endif
 
-    methodChannel.setMethodCallHandler(nil)
+    clearMethodCallHandler()
     detachTimers()
     recorderConverter?.reset()
     recorderConverter = nil
-    try? stop()
+    // Initialization can fail at AVAudioSession activation (notably `!pri`)
+    // before player nodes exist. Never dereference the IUO during partial-init
+    // cleanup; only the bare engine and session need releasing on that path.
+    if audioPlayerNode != nil {
+      try? stop()
+    } else {
+      audioEngine.stop()
+    }
     try? audioSession.deactivate()
   }
 
   func dispose() throws {
+    guard !isDisposed else { return }
     isDisposed = true
+    detachObservers()
 
-    // Remove tap BEFORE releasing APM to prevent use-after-free.
-    audioEngine.inputNode.removeTap(onBus: recorderPreferredBus)
-
+    clearMethodCallHandler()
+    detachTimers()
+    // Stop render callbacks before releasing their capture processor. Removing
+    // a live tap first forces a second graph reconfiguration and can wedge
+    // simulator/device teardown behind CoreAudio's reconfiguration timeout.
+    try stop()
+    removeRecorderTap()
     #if os(iOS)
       webRtcApm?.release()
       webRtcApm = nil
     #endif
-
-    methodChannel.setMethodCallHandler(nil)
-    detachTimers()
-    try stop()
     try audioSession.deactivate()
   }
 
@@ -331,18 +492,18 @@ class RealtimeAudio: NSObject {
     change: [NSKeyValueChangeKey: Any]?,
     context: UnsafeMutableRawPointer?
   ) {
-    switch keyPath {
-    case "outputVolume":
+    guard keyPath == "outputVolume" else { return }
+    nativeQueue.async { [weak self] in
+      guard let self, !isDisposed else { return }
       #if os(iOS)
         if audioEngine.mainMixerNode.outputVolume != audioSession.instance.outputVolume {
           changeVolume()
-          assert(Thread.isMainThread)
-          methodChannel.invokeMethod("echo", arguments: "Volume changing to \(audioSession.instance.outputVolume)")
+          invokeFlutter(
+            "echo",
+            arguments: "Volume changing to \(audioSession.instance.outputVolume)"
+          )
         }
       #endif
-      break
-    default:
-      break  // Do nothing
     }
   }
 
@@ -356,37 +517,42 @@ class RealtimeAudio: NSObject {
   }
 
   private func attachTimers() {
-    let progressInterval: TimeInterval = arguments.playerProgressInterval.fromMsToTimeInterval()
-    let volumeInterval: TimeInterval = arguments.playerVolumeInterval.fromMsToTimeInterval()
+    if playerProgressTimer == nil {
+      let timer = DispatchSource.makeTimerSource(queue: nativeQueue)
+      timer.schedule(
+        deadline: .now() + .milliseconds(arguments.playerProgressInterval),
+        repeating: .milliseconds(arguments.playerProgressInterval)
+      )
+      timer.setEventHandler { [weak self] in self?.notifyPlayerProgress() }
+      playerProgressTimer = timer
+      timer.resume()
+    }
 
-    playerProgressTimer =
-      self.playerProgressTimer
-      ?? Timer.scheduledTimer(withTimeInterval: progressInterval, repeats: true) { [weak self] timer in
-        if let self { self.notifyPlayerProgress() } else { timer.invalidate() }
-      }
-
-    playerVolumeTimer =
-      self.playerVolumeTimer
-      ?? Timer.scheduledTimer(withTimeInterval: volumeInterval, repeats: true) { [weak self] timer in
-        if let self { self.notifyPlayerVolume() } else { timer.invalidate() }
-      }
+    if playerVolumeTimer == nil {
+      let timer = DispatchSource.makeTimerSource(queue: nativeQueue)
+      timer.schedule(
+        deadline: .now() + .milliseconds(arguments.playerVolumeInterval),
+        repeating: .milliseconds(arguments.playerVolumeInterval)
+      )
+      timer.setEventHandler { [weak self] in self?.notifyPlayerVolume() }
+      playerVolumeTimer = timer
+      timer.resume()
+    }
   }
 
   private func detachTimers() {
-    playerVolumeTimer?.invalidate()
+    playerVolumeTimer?.setEventHandler {}
+    playerVolumeTimer?.cancel()
     playerVolumeTimer = nil
-    playerProgressTimer?.invalidate()
+    playerProgressTimer?.setEventHandler {}
+    playerProgressTimer?.cancel()
     playerProgressTimer = nil
   }
 
   private func notifyState() {
     if isDisposed || isDeinitialized { return }
-
-    DispatchQueue.main.async { [weak self] in
-      guard let self, let json = try? self.state.toJsonMap() else { return }
-      assert(Thread.isMainThread)
-      self.methodChannel.invokeMethod("state", arguments: json)
-    }
+    guard let json = try? state.toJsonMap() else { return }
+    invokeFlutter("state", arguments: json)
   }
 
   private func notifyPlayerProgress() {
@@ -409,15 +575,11 @@ class RealtimeAudio: NSObject {
     let renderClockMs = audioPlayerNode.lifetimeRenderClockMs
     let isRendering = effectiveIsRendering()
 
-    DispatchQueue.main.async { [weak self] in
-      guard let self else { return }
-
-      self.state.duration = duration
-      self.state.durationTotal = durationTotal
-      self.state.renderClockMs = renderClockMs
-      self.state.isRendering = isRendering
-      self.notifyState()
-    }
+    state.duration = duration
+    state.durationTotal = durationTotal
+    state.renderClockMs = renderClockMs
+    state.isRendering = isRendering
+    notifyState()
   }
 
   private func notifyPlayerState(
@@ -446,13 +608,18 @@ class RealtimeAudio: NSObject {
       if let dbfs { volume = dbfs }
     }
 
-    DispatchQueue.main.async { [weak self] in
-      self?.methodChannel.invokeMethod("playerVolume", arguments: volume)
-    }
+    invokeFlutter("playerVolume", arguments: volume)
   }
 
   func notifyRecorderVolume(_ volume: Float? = nil) {
-    methodChannel.invokeMethod("recorderVolume", arguments: volume ?? -96.0)
+    invokeFlutter("recorderVolume", arguments: volume ?? -96.0)
+  }
+
+  private func invokeFlutter(_ method: String, arguments: Any? = nil) {
+    guard !isDisposed, !isDeinitialized else { return }
+    DispatchQueue.main.async { [methodChannel] in
+      methodChannel.invokeMethod(method, arguments: arguments)
+    }
   }
 
   /// Effective render state: the raw node signal (outstanding buffers or
@@ -472,18 +639,22 @@ class RealtimeAudio: NSObject {
     ]
   }
 
-  /// Live read-back of the AEC path. On iOS/macOS, AEC is Apple's
-  /// VoiceProcessingIO (a platform AEC) — enabled only when recording with
-  /// `voiceProcessing`; the WebRTC APM does NS+AGC only here. `nativeEnabled`
-  /// reads the real state back (`isVoiceProcessingEnabled`) rather than assuming.
+  /// Live read-back of the selected AEC path.
   private func echoCancellationStateMap() -> [String: Any] {
     var nativeEnabled = false
     var mechanism = RealtimeAudioEchoCancellationMechanism.none
 
     #if os(iOS)
       if isRecorderEnabled && arguments.voiceProcessing {
-        mechanism = .platformAec
-        nativeEnabled = audioEngine.inputNode.isVoiceProcessingEnabled
+        switch audioCaptureStrategy {
+        case .inputVoiceProcessing:
+          nativeEnabled = audioEngine.inputNode.isVoiceProcessingEnabled
+        case .none:
+          nativeEnabled = false
+        }
+        if nativeEnabled {
+          mechanism = .platformAec
+        }
       }
     #endif
 
@@ -501,13 +672,7 @@ extension RealtimeAudio {
     do {
       try handleFlutterMethodSafe(call: call, result: result)
     } catch {
-      let flutterError = FlutterError(
-        code: "INTERNAL",
-        message: (error as? TextError)?.message ?? error.localizedDescription,
-        details: nil
-      )
-
-      result(flutterError)
+      result(realtimeAudioFlutterError(error))
     }
   }
 
@@ -649,9 +814,9 @@ extension RealtimeAudio {
 
 // Player extension.
 extension RealtimeAudio: ChunkAudioEventListener {
-  func onChunkQueued(_ id: String) { methodChannel.invokeMethod("chunkQueued", arguments: id) }
-  func onChunkPlayed(_ id: String) { methodChannel.invokeMethod("chunkPlayed", arguments: id) }
-  func onChunkQueueStarted(_ id: String) { methodChannel.invokeMethod("chunkQueueStarted", arguments: id) }
+  func onChunkQueued(_ id: String) { invokeFlutter("chunkQueued", arguments: id) }
+  func onChunkPlayed(_ id: String) { invokeFlutter("chunkPlayed", arguments: id) }
+  func onChunkQueueStarted(_ id: String) { invokeFlutter("chunkQueueStarted", arguments: id) }
   func onChunkQueueEnded() {
     notifyEngineHealth(
       type: "playback_queue_drained",
@@ -708,13 +873,14 @@ extension RealtimeAudio {
 
     // New capture session — capture liveness is unproven until the first buffer.
     captureProvenLive = false
-    audioEngine.inputNode.removeTap(onBus: recorderPreferredBus)
+    removeRecorderTap()
 
     let input = audioEngine.inputNode
     let inputFormat = input.inputFormat(forBus: recorderPreferredBus)
     let ratio: Float = Float(inputFormat.sampleRate) / Float(recorderFormat.sampleRate)
     let converter = try getRecorderConverter(inputFormat, recorderFormat)
     let bufferSize = AVAudioFrameCount(inputFormat.sampleRate * Double(arguments.recorderChunkInterval) / 1000)
+    var hasReportedLiveBuffer = false
 
     input.installTap(
       onBus: recorderPreferredBus,
@@ -724,8 +890,15 @@ extension RealtimeAudio {
       guard let self else { return }
       if self.shouldBePaused { return }
 
-      // First real capture buffer proves the mic path is live (captureProvenLive).
-      if buffer.frameLength > 0 { self.captureProvenLive = true }
+      // Keep engine state confined to nativeQueue. AVAudioEngine invokes this
+      // closure on its realtime render thread.
+      if buffer.frameLength > 0, !hasReportedLiveBuffer {
+        hasReportedLiveBuffer = true
+        self.nativeQueue.async { [weak self] in
+          guard let self, !isDisposed else { return }
+          captureProvenLive = true
+        }
+      }
 
       let inputCallback: AVAudioConverterInputBlock = { inNumPackets, outStatus in
         outStatus.pointee = .haveData
@@ -750,10 +923,17 @@ extension RealtimeAudio {
         self.handleRecorderData(buffer)
       }
     }
+    recorderTapInstalled = true
+  }
+
+  private func removeRecorderTap() {
+    guard recorderTapInstalled else { return }
+    audioEngine.inputNode.removeTap(onBus: recorderPreferredBus)
+    recorderTapInstalled = false
   }
 
   // No output tap needed — APM handles NS + AGC only, not AEC.
-  // Apple's VoiceProcessingIO handles echo cancellation at the hardware level.
+  // The selected Apple platform path handles echo cancellation at the hardware level.
 
   private func handleRecorderData(_ buffer: AVAudioPCMBuffer) {
     // Convert buffer to UInt8 list.
@@ -785,9 +965,9 @@ extension RealtimeAudio {
     let volume = [buffer].getDbfs(0, Int(buffer.frameLength))
 
     DispatchQueue.main.async { [weak self] in
-      assert(Thread.isMainThread)
-      self?.methodChannel.invokeMethod("recorderData", arguments: flutterData)
-      self?.notifyRecorderVolume(volume)
+      guard let self else { return }
+      methodChannel.invokeMethod("recorderData", arguments: flutterData)
+      methodChannel.invokeMethod("recorderVolume", arguments: volume)
     }
   }
 }
@@ -820,8 +1000,8 @@ extension RealtimeAudio {
 
 extension RealtimeAudio {
   private func start() throws {
-    shouldBeStarted = true
     try audioEngine.start()
+    shouldBeStarted = true
     playBackground()
     playAudio()
   }
@@ -834,8 +1014,8 @@ extension RealtimeAudio {
   }
 
   private func resume() throws {
-    shouldBePaused = false
     try audioEngine.start()
+    shouldBePaused = false
     playBackground()
     playAudio()
   }
@@ -852,8 +1032,64 @@ extension RealtimeAudio {
   /// disposing the engine. Triggers an internal restart to reconfigure the
   /// audio session and engine nodes.
   func setRecorderEnabled(_ enabled: Bool) throws {
+    guard !recorderStateIsUnknown else {
+      throw TextError("Recorder state is unavailable after a failed rollback; recreate the engine.")
+    }
     if enabled == isRecorderEnabled { return }
-    _recorderEnabledOverride = enabled
+    let previousOverride = _recorderEnabledOverride
+    let previousEnabled = isRecorderEnabled
+    let previousStrategy = audioCaptureStrategy
+    do {
+      try RecorderStateTransition.apply(
+        targetEnabled: enabled,
+        performNativeTransition: {
+          pendingRecorderEnabled = enabled
+          try applyNativeRecorderState(enabled: enabled)
+        },
+        rollbackNativeTransition: {
+          pendingRecorderEnabled = previousEnabled
+          try applyNativeRecorderState(
+            enabled: previousEnabled,
+            strategy: previousStrategy
+          )
+        },
+        commit: {
+          _recorderEnabledOverride = $0
+          pendingRecorderEnabled = nil
+        }
+      )
+    } catch {
+      pendingRecorderEnabled = nil
+      if error is RecorderStateRollbackError {
+        recorderStateIsUnknown = true
+      } else {
+        _recorderEnabledOverride = previousOverride
+        audioCaptureStrategy = previousStrategy
+      }
+      throw error
+    }
+  }
+
+  private func applyNativeRecorderState(
+    enabled: Bool,
+    strategy: IOSAudioCaptureStrategy? = nil
+  ) throws {
+    let restartEngine = shouldBeStarted
+    if restartEngine {
+      stopBackground(isRestart: true)
+      stopAudio()
+      audioEngine.stop()
+      audioEngine.reset()
+    }
+    removeRecorderTap()
+
+    try audioSession.configure(
+      recorderEnabled: enabled,
+      voiceProcessingRequested: arguments.voiceProcessing
+    )
+    try audioSession.activate()
+    audioCaptureStrategy =
+      strategy ?? negotiateAudioCaptureStrategy(recorderEnabled: enabled)
 
     #if os(iOS)
       if enabled && arguments.voiceProcessing && webRtcApm == nil {
@@ -865,19 +1101,11 @@ extension RealtimeAudio {
       }
     #endif
 
-    try audioSession.configure(recorderEnabled: enabled)
-    try audioSession.activate()
-    try restart()
-  }
-
-  private func restart() throws {
-    if !shouldBeStarted { return }
-    stopBackground(isRestart: true)
-    stopAudio()
-    audioEngine.stop()
-    audioEngine.reset()
-    try attachNodes()
+    try applyVoiceProcessingStrategy()
     try installTap()
-    try start()
+    audioEngine.prepare()
+    if restartEngine {
+      try start()
+    }
   }
 }
