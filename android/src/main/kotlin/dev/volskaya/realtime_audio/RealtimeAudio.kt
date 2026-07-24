@@ -81,6 +81,9 @@ class RealtimeAudio(
 
   private var webRtcApm: WebRtcApm? = null
 
+  /// Frame-aligns the write-time far-end feed into [webRtcApm] (null when no APM).
+  private var renderFeeder: ApmRenderFeeder? = null
+
   private var isRunning = false
   private var isDisposed = false
   private var shouldBeRunning = false
@@ -134,10 +137,29 @@ class RealtimeAudio(
         Log.w("RealtimeAudio", "WebRTC APM unavailable, falling back to raw audio: ${it.message}")
       }.getOrNull()?.takeIf { it.isAvailable }
     }
+    attachRenderTapIfNeeded()
 
     methodChannel.setMethodCallHandler(this)
 
     audioBackgroundTrack?.setVolume(arguments.backgroundVolume.toFloat())
+  }
+
+  /// Feed the APM's far-end reference from the writer thread (write-time, one
+  /// track buffer ahead of the speaker) instead of queue time (whole chunks
+  /// ahead). ApmRenderFeeder re-frames arbitrary write sizes to whole 10ms
+  /// frames so the JNI bridge never drops tail bytes.
+  private fun attachRenderTapIfNeeded() {
+    val apm = webRtcApm
+    if (apm == null) {
+      renderFeeder = null
+      audioTrack.renderTap = null
+      return
+    }
+    val feeder = ApmRenderFeeder(
+      frameBytes = (arguments.playerSampleRate / 100) * playerOutputFormat.getBitRatio(),
+    ) { frames -> webRtcApm?.processRender(frames) }
+    renderFeeder = feeder
+    audioTrack.renderTap = { data, offset, length -> feeder.feed(data, offset, length) }
   }
 
   fun dispose() {
@@ -146,6 +168,8 @@ class RealtimeAudio(
     stopBackground()
     stopAudio()
     stopRecording()
+    audioTrack.renderTap = null
+    renderFeeder = null
     webRtcApm?.release()
     webRtcApm = null
     audioBackgroundTrack?.release()
@@ -450,9 +474,8 @@ class RealtimeAudio(
   private fun queueAudio(id: String, data: ByteArray) {
     if (data.isEmpty()) return
 
-    // Feed playback audio into APM as far-end echo reference.
-    webRtcApm?.processRender(data)
-
+    // Far-end APM feed happens at WRITE time via audioTrack.renderTap — a
+    // queue-time feed here ran the echo reference seconds ahead of the speaker.
     audioTrack.queue(id, data)
     if (audioTrack.playState != AudioTrack.PLAYSTATE_PAUSED) {
       playAudio()
@@ -486,6 +509,8 @@ class RealtimeAudio(
       audioTrack.stop()
       audioTrack.flush()
     }
+    // The carried sub-frame tail belongs to audio that will never render.
+    renderFeeder?.reset()
 
     notifyPlayerState()
     notifyPlayerProgress()
@@ -618,6 +643,7 @@ class RealtimeAudio(
           }
         }.getOrNull()?.takeIf { it.isAvailable }
       }
+      attachRenderTapIfNeeded()
       if (isRunning) startRecording()
     } else {
       // Release recorder + APM
@@ -626,6 +652,8 @@ class RealtimeAudio(
       recorder = null
       recorderData = null
       captureProvenLive = false
+      audioTrack.renderTap = null
+      renderFeeder = null
       webRtcApm?.release()
       webRtcApm = null
     }

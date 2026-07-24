@@ -52,6 +52,12 @@ class ChunkAudioTrack(
   private var postedReconcileGeneration: Long? = null
   private var fallbackPoll: PlaybackHeadFallbackPoll? = null
 
+  /// Write-time render tap: invoked on the writer thread with the exact byte
+  /// range just accepted by `AudioTrack.write`, i.e. within one track buffer of
+  /// the speaker. Feeds the WebRTC APM far-end reference (see ApmRenderFeeder);
+  /// a queue-time feed would lead actual playout by whole chunks and break AEC.
+  var renderTap: ((data: ByteArray, offset: Int, length: Int) -> Unit)? = null
+
   val queue: List<QueuedChunk> get() = synchronized(lock) { chunks.toList() }
   val totalDataSize: Int get() = synchronized(lock) { segmentDataSize }
   val totalSampleTime: Int get() = totalDataSize / bitRatio
@@ -180,6 +186,7 @@ class ChunkAudioTrack(
           eventListener.get()?.onPlaybackDrainError("AudioTrack.write failed with code $written")
           return
         }
+        renderTap?.invoke(cursor.chunk.data, cursor.byteOffset, written)
 
         val reconcileGeneration = synchronized(lock) {
           if (thread !== currentThread) return

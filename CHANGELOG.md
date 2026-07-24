@@ -1,3 +1,14 @@
+## 0.0.15
+
+* Fix Android echo cancellation: feed the WebRTC APM far-end (render) reference
+  at `AudioTrack.write` time from the writer thread instead of at queue time.
+  The queue-time feed ran the echo reference ahead of the speaker by whole
+  queued chunks, so AEC3 could not converge and the assistant's own playback
+  leaked back through the microphone (2026-07-23 echo-storm RCA).
+* Add `ApmRenderFeeder`: re-frames arbitrary write sizes into whole 10ms APM
+  frames with remainder carry, so the JNI bridge no longer drops tail bytes of
+  every feed call.
+
 ## 0.0.14
 
 * Preserve scheduled iOS/macOS playback across audio-engine configuration
