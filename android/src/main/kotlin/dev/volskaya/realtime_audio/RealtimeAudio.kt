@@ -11,6 +11,8 @@ import android.media.AudioRecord.OnRecordPositionUpdateListener
 import android.media.AudioTrack
 import android.media.AudioTrack.OnPlaybackPositionUpdateListener
 import android.media.MediaRecorder
+import android.media.audiofx.AcousticEchoCanceler
+import android.media.audiofx.NoiseSuppressor
 import android.util.Log
 import android.os.Handler
 import android.os.Looper
@@ -84,6 +86,26 @@ class RealtimeAudio(
   /// Frame-aligns the write-time far-end feed into [webRtcApm] (null when no APM).
   private var renderFeeder: ApmRenderFeeder? = null
 
+  /// The echo-control architecture this engine is running (2026-07-24 Android
+  /// echo RCA): platform voice-call path with hardware AEC when the device
+  /// offers it, software AEC3 fallback otherwise. See [EchoPathPolicy].
+  private var echoDecision: EchoPathDecision = EchoPathPolicy.decide(
+    voiceProcessing = false,
+    hardwareAecAvailable = false,
+    apmLoaded = false,
+  )
+  private var hardwareAec: AcousticEchoCanceler? = null
+  private var hardwareNs: NoiseSuppressor? = null
+
+  /// Whether the playback AudioTrack was built on the voice-call path
+  /// (USAGE_VOICE_COMMUNICATION). Bound at engine creation — a later
+  /// setRecorderEnabled(true) must not claim the hardware echo path over a
+  /// media-usage track the HAL AEC never references.
+  private var playbackOnVoicePath: Boolean = false
+  private val voiceCallSession = VoiceCallAudioSession(
+    context.getSystemService(Context.AUDIO_SERVICE) as AudioManager,
+  )
+
   private var isRunning = false
   private var isDisposed = false
   private var shouldBeRunning = false
@@ -110,38 +132,119 @@ class RealtimeAudio(
 
     //setPerformanceMode
 
-    recorder = if (arguments.recorderEnabled) getRecorder() else null
+    echoDecision = decideEchoPath(recorderEnabled = arguments.recorderEnabled)
+    if (arguments.recorderEnabled && echoDecision.communicationMode) {
+      val commActive = voiceCallSession.enter()
+      if (!commActive && echoDecision.attachHardwareAec) {
+        // A hardware AEC without an established voice-call context has no
+        // far-end reference and cancels nothing — degrade to the software
+        // path, whose renderTap-fed AEC3 is routing-independent.
+        echoDecision = decideEchoPath(recorderEnabled = true, hardwareAecAvailable = false)
+      }
+    }
+    playbackOnVoicePath = echoDecision.voiceCommunicationPlayback
+    try {
+      recorder = if (arguments.recorderEnabled) getRecorder(echoDecision.captureSource) else null
+      if (arguments.recorderEnabled) {
+        setupEchoControl()
+      }
+    } catch (e: Throwable) {
+      // A construction failure has no owner to dispose() — release what this
+      // ctor acquired so the process-global comm mode cannot leak.
+      releaseHardwareEffects()
+      webRtcApm?.release()
+      webRtcApm = null
+      voiceCallSession.exit()
+      throw e
+    }
+    // NOTE: playback attributes are bound to the echo decision at engine
+    // creation. Every voice-call consumer creates the engine with the
+    // recorder already enabled, so a later setRecorderEnabled(true) does not
+    // re-create the track.
     audioTrack = getAudioTrack(audioSessionId)
     audioBackgroundTrack = if (arguments.backgroundEnabled) getBackgroundTrack(audioSessionId) else null
-    audioManager.mode = AudioManager.MODE_NORMAL
+    attachRenderTapIfNeeded()
 
-    if (arguments.voiceProcessing && arguments.recorderEnabled) {
+    methodChannel.setMethodCallHandler(this)
+
+    audioBackgroundTrack?.setVolume(arguments.backgroundVolume.toFloat())
+  }
+
+  /// Probe hardware AEC + APM availability and decide the echo architecture.
+  private fun decideEchoPath(recorderEnabled: Boolean, hardwareAecAvailable: Boolean = AcousticEchoCanceler.isAvailable()): EchoPathDecision =
+    EchoPathPolicy.decide(
+      voiceProcessing = arguments.voiceProcessing && recorderEnabled,
+      hardwareAecAvailable = hardwareAecAvailable,
+      apmLoaded = WebRtcApmJni.loaded,
+    )
+
+  /// Attach the decided echo control to the CURRENT recorder: the hardware
+  /// AcousticEchoCanceler (platform voice-call path), or the software APM.
+  /// A runtime hardware-attach failure (isAvailable() lied — vendor stub)
+  /// re-decides onto the software path, which needs the unprocessed capture
+  /// source, so the recorder is recreated.
+  private fun setupEchoControl() {
+    val rec = recorder ?: return
+    var decision = echoDecision
+    if (decision.attachHardwareAec) {
+      val aec = runCatching {
+        AcousticEchoCanceler.create(rec.audioSessionId)?.also { it.enabled = true }
+      }.getOrNull()
+      if (aec != null) {
+        hardwareAec = aec
+        hardwareNs = runCatching {
+          NoiseSuppressor.create(rec.audioSessionId)?.also { it.enabled = true }
+        }.getOrNull()
+        Log.i("RealtimeAudio", "Hardware AEC attached (session ${rec.audioSessionId}, NS=${hardwareNs != null})")
+      } else {
+        decision = decideEchoPath(recorderEnabled = true, hardwareAecAvailable = false)
+        echoDecision = decision
+        Log.w("RealtimeAudio", "Hardware AEC create failed — falling back to ${decision.mechanism.wire}")
+        // Recreate the recorder on the software path's unprocessed source. A
+        // recreate failure must PROPAGATE (the old getRecorder contract): the
+        // released recorder must never be left installed as a silently-dead
+        // mic — the app's recorder-recovery path owns loud failures.
+        rec.release()
+        recorder = null
+        recorder = getRecorder(decision.captureSource)
+      }
+    }
+    if (decision.useApm) {
       webRtcApm = runCatching {
         WebRtcApm(
           captureSampleRate = arguments.recorderSampleRate,
           renderSampleRate = arguments.playerSampleRate,
           aecEnabled = true,
           nsEnabled = true,
-          agcEnabled = true,
+          agcEnabled = decision.apmAgcEnabled,
+          mobileAec = decision.apmMobileAec,
         ).also { apm ->
-          // Estimate audio pipeline delay: AudioTrack buffer + AudioRecord buffer.
-          val playbackLatencyMs = (playerOutputFormat.getMinBufferSizeTrack().toLong() * 1000) /
-            (arguments.playerSampleRate * playerOutputFormat.getBitRatio())
-          val captureLatencyMs = (recorderFormat.getMinBufferSizeRecord().toLong() * 1000) /
-            (arguments.recorderSampleRate * recorderFormat.getBitRatio())
-          val totalDelayMs = (playbackLatencyMs + captureLatencyMs).toInt().coerceIn(50, 300)
+          val totalDelayMs = estimatePipelineDelayMs()
           apm.setStreamDelay(totalDelayMs)
-          Log.i("RealtimeAudio", "APM stream delay: ${totalDelayMs}ms (playback=${playbackLatencyMs}ms, capture=${captureLatencyMs}ms)")
+          Log.i("RealtimeAudio", "APM stream delay: ${totalDelayMs}ms")
         }
       }.onFailure {
         Log.w("RealtimeAudio", "WebRTC APM unavailable, falling back to raw audio: ${it.message}")
       }.getOrNull()?.takeIf { it.isAvailable }
     }
-    attachRenderTapIfNeeded()
+  }
 
-    methodChannel.setMethodCallHandler(this)
+  /// Static AudioTrack+AudioRecord buffer estimate — the AEC3 delay
+  /// estimator's starting hint (AECM would depend on it entirely).
+  private fun estimatePipelineDelayMs(): Int {
+    val playbackLatencyMs = (playerOutputFormat.getMinBufferSizeTrack().toLong() * 1000) /
+      (arguments.playerSampleRate * playerOutputFormat.getBitRatio())
+    val captureLatencyMs = (recorderFormat.getMinBufferSizeRecord().toLong() * 1000) /
+      (arguments.recorderSampleRate * recorderFormat.getBitRatio())
+    return (playbackLatencyMs + captureLatencyMs).toInt().coerceIn(50, 300)
+  }
 
-    audioBackgroundTrack?.setVolume(arguments.backgroundVolume.toFloat())
+  /// Release hardware audio effects attached to the capture session.
+  private fun releaseHardwareEffects() {
+    runCatching { hardwareAec?.release() }
+    hardwareAec = null
+    runCatching { hardwareNs?.release() }
+    hardwareNs = null
   }
 
   /// Feed the APM's far-end reference from the writer thread (write-time, one
@@ -170,11 +273,13 @@ class RealtimeAudio(
     stopRecording()
     audioTrack.renderTap = null
     renderFeeder = null
+    releaseHardwareEffects()
     webRtcApm?.release()
     webRtcApm = null
     audioBackgroundTrack?.release()
     audioTrack.release()
     recorder?.release()
+    voiceCallSession.exit()
   }
 
 
@@ -355,35 +460,41 @@ class RealtimeAudio(
     "isRendering" to effectiveIsRendering(),
   )
 
-  /// Live read-back of the AEC path. On Android, AEC is the bundled WebRTC APM
-  /// (software) when available; otherwise the engine relies on the platform
-  /// VOICE_COMMUNICATION capture source (reported as `platform_aec`), whose
-  /// liveness cannot be read back. `nativeEnabled` reflects the APM path only.
-  private fun echoCancellationStateMap(): Map<String, Any> {
-    val apmLive = webRtcApm?.isAvailable == true
-    val mechanism = when {
-      apmLive -> "webrtc_apm"
-      isRecorderEnabled && arguments.voiceProcessing -> "platform_aec"
-      else -> "none"
-    }
-
-    return mapOf(
-      "requested" to arguments.voiceProcessing,
-      "nativeEnabled" to apmLive,
-      "mechanism" to mechanism,
-      "captureProvenLive" to captureProvenLive,
-    )
-  }
+  /// Live read-back of the AEC path. `platform_aec` is claimed ONLY for a
+  /// successfully-attached hardware AcousticEchoCanceler (the old read-back
+  /// reported it for the bare VOICE_COMMUNICATION source, an unverifiable
+  /// ghost); `webrtc_apm` for a live software APM (AEC3 on the shipped
+  /// policy), with the APM's measured ERLE riding along so consumers can
+  /// trust full duplex on cancellation EVIDENCE, not liveness.
+  private fun echoCancellationStateMap(): Map<String, Any?> = EchoStateReadback.build(
+    requested = arguments.voiceProcessing,
+    captureProvenLive = captureProvenLive,
+    hardwareAecAttached = hardwareAec != null,
+    apmLive = webRtcApm?.isAvailable == true,
+    apmMobileAec = echoDecision.apmMobileAec,
+    erleDb = webRtcApm?.echoReturnLossEnhancementDb(),
+  )
 
   //
 
   private fun getAudioTrack(audioSessionId: Int? = null) =
     ChunkAudioTrack(
-      AudioAttributes.Builder()
-        .setLegacyStreamType(AudioManager.STREAM_MUSIC)
-        .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
-        .setUsage(AudioAttributes.USAGE_MEDIA)
-        .build(),
+      if (echoDecision.voiceCommunicationPlayback) {
+        // The platform voice-call path: voice-usage playback routes through
+        // the primary (low-latency) output AND lands in the HAL AEC's far-end
+        // reference — a media-usage track on many OEMs does neither
+        // (2026-07-24 Android echo RCA).
+        AudioAttributes.Builder()
+          .setUsage(AudioAttributes.USAGE_VOICE_COMMUNICATION)
+          .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+          .build()
+      } else {
+        AudioAttributes.Builder()
+          .setLegacyStreamType(AudioManager.STREAM_MUSIC)
+          .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
+          .setUsage(AudioAttributes.USAGE_MEDIA)
+          .build()
+      },
       playerOutputFormat,
       playerOutputFormat.getMinBufferSizeTrack(),
       AudioTrack.MODE_STREAM,
@@ -391,6 +502,12 @@ class RealtimeAudio(
       this
     )
 
+  // NOTE: the background loop stays on the media path even during a voice
+  // call — it is NOT in the hardware AEC's far-end reference and is not fed
+  // to the software APM (renderTap covers only the assistant track), so any
+  // audible background leaks into the uplink uncancelled. The voice-call
+  // consumers run with backgroundEnabled=false; revisit before pairing
+  // background audio with a call.
   private fun getBackgroundTrack(audioSessionId: Int? = null) =
     LoopAudioTrack(
       AudioAttributes.Builder()
@@ -404,7 +521,7 @@ class RealtimeAudio(
       audioSessionId ?: AudioManager.AUDIO_SESSION_ID_GENERATE,
     )
 
-  private fun getRecorder(): AudioRecord {
+  private fun getRecorder(source: CaptureSource): AudioRecord {
     val permission = ActivityCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO)
     val isPermissionGranted = permission == PackageManager.PERMISSION_GRANTED
 
@@ -421,14 +538,13 @@ class RealtimeAudio(
     val minBufferSize = recorderFormat.getMinBufferSizeRecord()
     val bufferSize = minBufferSize * recorderFormat.getBitRatio()
 
-    // Use VOICE_COMMUNICATION source for hardware-level preprocessing (AEC/NS
-    // on supported devices) as a first pass. WebRTC APM then processes on top.
-    // Keep MODE_NORMAL for playback volume — VOICE_COMMUNICATION source works
-    // independently of audio mode.
-    val audioSource = if (arguments.voiceProcessing) {
-      MediaRecorder.AudioSource.VOICE_COMMUNICATION
-    } else {
-      MediaRecorder.AudioSource.MIC
+    val audioSource = when (source) {
+      // Vendor voice-call preprocessing — feeds the hardware AEC.
+      CaptureSource.VOICE_COMMUNICATION -> MediaRecorder.AudioSource.VOICE_COMMUNICATION
+      // Unprocessed/linear capture — what the software canceller needs
+      // (vendor preprocessing is nonlinear and defeats it).
+      CaptureSource.VOICE_RECOGNITION -> MediaRecorder.AudioSource.VOICE_RECOGNITION
+      CaptureSource.MIC -> MediaRecorder.AudioSource.MIC
     }
 
     return AudioRecord(
@@ -620,33 +736,48 @@ class RealtimeAudio(
   /// and WebRtcApm as needed.
   private fun setRecorderEnabled(enabled: Boolean) {
     if (enabled == isRecorderEnabled) return
-    isRecorderEnabled = enabled
 
     if (enabled) {
-      // Create recorder + APM
-      recorder = getRecorder()
-      if (arguments.voiceProcessing) {
-        webRtcApm = runCatching {
-          WebRtcApm(
-            captureSampleRate = arguments.recorderSampleRate,
-            renderSampleRate = arguments.playerSampleRate,
-            aecEnabled = true,
-            nsEnabled = true,
-            agcEnabled = true,
-          ).also { apm ->
-            val playbackLatencyMs = (playerOutputFormat.getMinBufferSizeTrack().toLong() * 1000) /
-              (arguments.playerSampleRate * playerOutputFormat.getBitRatio())
-            val captureLatencyMs = (recorderFormat.getMinBufferSizeRecord().toLong() * 1000) /
-              (arguments.recorderSampleRate * recorderFormat.getBitRatio())
-            val totalDelayMs = (playbackLatencyMs + captureLatencyMs).toInt().coerceIn(50, 300)
-            apm.setStreamDelay(totalDelayMs)
-          }
-        }.getOrNull()?.takeIf { it.isAvailable }
+      var decision = decideEchoPath(recorderEnabled = true)
+      val commActive = if (decision.communicationMode) voiceCallSession.enter() else true
+      // A hardware AEC without an established voice-call context, or over a
+      // playback track built on the media path (engine constructed
+      // recorder-disabled), has no far-end reference — take the software
+      // path instead, whose renderTap-fed AEC3 is routing-independent.
+      if (decision.attachHardwareAec && (!commActive || !playbackOnVoicePath)) {
+        decision = decideEchoPath(recorderEnabled = true, hardwareAecAvailable = false)
       }
+      echoDecision = decision
+      try {
+        recorder = getRecorder(decision.captureSource)
+        setupEchoControl()
+      } catch (e: Throwable) {
+        // Roll back to the DISABLED posture so a later retry re-attempts.
+        // Committing `isRecorderEnabled` before the fallible work wedged the
+        // engine permanently on a transient AudioRecord failure: the toggle
+        // guard turned every retry into a no-op over a null recorder (dead
+        // mic for the engine's life — adversarial review D1). The comm
+        // session stays held, matching the disabled posture; dispose() owns
+        // its release.
+        runCatching { recorder?.release() }
+        recorder = null
+        recorderData = null
+        captureProvenLive = false
+        releaseHardwareEffects()
+        webRtcApm?.release()
+        webRtcApm = null
+        audioTrack.renderTap = null
+        renderFeeder = null
+        throw e
+      }
+      isRecorderEnabled = true
       attachRenderTapIfNeeded()
       if (isRunning) startRecording()
     } else {
-      // Release recorder + APM
+      isRecorderEnabled = false
+      // Release recorder + hardware effects + APM, leave the voice-call
+      // audio-manager state (a playback tail may still be draining and the
+      // recorder can come right back — recoverRecorder(); dispose() exits it).
       stopRecording()
       recorder?.release()
       recorder = null
@@ -654,6 +785,7 @@ class RealtimeAudio(
       captureProvenLive = false
       audioTrack.renderTap = null
       renderFeeder = null
+      releaseHardwareEffects()
       webRtcApm?.release()
       webRtcApm = null
     }

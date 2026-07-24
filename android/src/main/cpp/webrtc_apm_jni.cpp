@@ -2,6 +2,7 @@
 #include <android/log.h>
 #include <cstring>
 #include <cstdlib>
+#include <limits>
 #include "webrtc-audio-processing/webrtc/modules/audio_processing/include/audio_processing.h"
 
 #define TAG "WebRtcApm"
@@ -20,10 +21,11 @@ struct ApmHandle {
 extern "C" {
 
 JNIEXPORT jlong JNICALL
-Java_dev_volskaya_realtime_1audio_WebRtcApm_nativeCreate(
+Java_dev_volskaya_realtime_1audio_WebRtcApmJni_nativeCreate(
     JNIEnv* env, jobject /* this */,
     jint captureSampleRate, jint renderSampleRate,
-    jboolean aecEnabled, jboolean nsEnabled, jboolean agcEnabled) {
+    jboolean aecEnabled, jboolean nsEnabled, jboolean agcEnabled,
+    jboolean mobileAec) {
 
     auto* handle = new ApmHandle();
     handle->apm = webrtc::AudioProcessingBuilder().Create();
@@ -35,10 +37,13 @@ Java_dev_volskaya_realtime_1audio_WebRtcApm_nativeCreate(
 
     auto config = webrtc::AudioProcessing::Config();
 
-    // Echo cancellation — mobile mode uses AECM which is lighter and
-    // designed for the strong echo coupling on mobile speakerphones.
+    // Echo cancellation. mobile_mode=true selects AECM (legacy suppressor,
+    // static-delay dependent, band-limited); false selects AEC3, whose
+    // adaptive delay estimator + linear filter is what actually converges on
+    // Android's variable-latency output paths (2026-07-24 Android echo RCA).
+    // The caller picks; see EchoPathPolicy on the Kotlin side.
     config.echo_canceller.enabled = aecEnabled;
-    config.echo_canceller.mobile_mode = true;
+    config.echo_canceller.mobile_mode = mobileAec;
     config.echo_canceller.enforce_high_pass_filtering = true;
 
     // Noise suppression at very high level for voice calls.
@@ -60,14 +65,14 @@ Java_dev_volskaya_realtime_1audio_WebRtcApm_nativeCreate(
     handle->apm->ApplyConfig(config);
     handle->apm->Initialize();
 
-    LOGI("APM created: capture=%dHz render=%dHz aec=%d ns=%d agc=%d",
-         captureSampleRate, renderSampleRate, aecEnabled, nsEnabled, agcEnabled);
+    LOGI("APM created: capture=%dHz render=%dHz aec=%d ns=%d agc=%d mobileAec=%d",
+         captureSampleRate, renderSampleRate, aecEnabled, nsEnabled, agcEnabled, mobileAec);
 
     return reinterpret_cast<jlong>(handle);
 }
 
 JNIEXPORT void JNICALL
-Java_dev_volskaya_realtime_1audio_WebRtcApm_nativeDestroy(
+Java_dev_volskaya_realtime_1audio_WebRtcApmJni_nativeDestroy(
     JNIEnv* env, jobject /* this */, jlong ptr) {
 
     auto* handle = reinterpret_cast<ApmHandle*>(ptr);
@@ -79,7 +84,7 @@ Java_dev_volskaya_realtime_1audio_WebRtcApm_nativeDestroy(
 }
 
 JNIEXPORT void JNICALL
-Java_dev_volskaya_realtime_1audio_WebRtcApm_nativeSetStreamDelay(
+Java_dev_volskaya_realtime_1audio_WebRtcApmJni_nativeSetStreamDelay(
     JNIEnv* env, jobject /* this */, jlong ptr, jint delayMs) {
 
     auto* handle = reinterpret_cast<ApmHandle*>(ptr);
@@ -90,7 +95,7 @@ Java_dev_volskaya_realtime_1audio_WebRtcApm_nativeSetStreamDelay(
 
 // Process capture (near-end / microphone) audio through APM.
 JNIEXPORT jbyteArray JNICALL
-Java_dev_volskaya_realtime_1audio_WebRtcApm_nativeProcessCapture(
+Java_dev_volskaya_realtime_1audio_WebRtcApmJni_nativeProcessCapture(
     JNIEnv* env, jobject /* this */, jlong ptr, jbyteArray audioData) {
 
     auto* handle = reinterpret_cast<ApmHandle*>(ptr);
@@ -147,7 +152,7 @@ Java_dev_volskaya_realtime_1audio_WebRtcApm_nativeProcessCapture(
 
 // Feed render (far-end / speaker playback) audio into APM as echo reference.
 JNIEXPORT void JNICALL
-Java_dev_volskaya_realtime_1audio_WebRtcApm_nativeProcessRender(
+Java_dev_volskaya_realtime_1audio_WebRtcApmJni_nativeProcessRender(
     JNIEnv* env, jobject /* this */, jlong ptr, jbyteArray audioData) {
 
     auto* handle = reinterpret_cast<ApmHandle*>(ptr);
@@ -187,6 +192,25 @@ Java_dev_volskaya_realtime_1audio_WebRtcApm_nativeProcessRender(
 
     delete[] floatBuf;
     env->ReleaseByteArrayElements(audioData, inputBytes, JNI_ABORT);
+}
+
+// AEC3 echo-return-loss-enhancement (dB) from the APM's own statistics — the
+// measured proof the canceller is actually cancelling (not merely running).
+// Returns NaN when no echo controller reports it (the AECM path). AEC3
+// populates the stat from its first processed block (~0 dB while
+// unconverged); consumers gate on magnitude, not presence.
+JNIEXPORT jdouble JNICALL
+Java_dev_volskaya_realtime_1audio_WebRtcApmJni_nativeGetErleDb(
+    JNIEnv* env, jobject /* this */, jlong ptr) {
+
+    auto* handle = reinterpret_cast<ApmHandle*>(ptr);
+    if (!handle || !handle->apm) return std::numeric_limits<double>::quiet_NaN();
+
+    auto stats = handle->apm->GetStatistics();
+    if (!stats.echo_return_loss_enhancement.has_value()) {
+        return std::numeric_limits<double>::quiet_NaN();
+    }
+    return *stats.echo_return_loss_enhancement;
 }
 
 } // extern "C"

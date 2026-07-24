@@ -1,3 +1,32 @@
+## 0.0.16
+
+* Android root-cause echo overhaul (2026-07-24 RCA — the cascade heard
+  itself): replace the media-playback + software-AECM architecture with the
+  platform voice-call path. When the device offers a hardware
+  AcousticEchoCanceler, the engine now runs `MODE_IN_COMMUNICATION`,
+  `USAGE_VOICE_COMMUNICATION`/`CONTENT_TYPE_SPEECH` playback and
+  `VOICE_COMMUNICATION` capture with the hardware AEC + NoiseSuppressor
+  attached (the OEM speakerphone tuning — the iOS-VPIO analogue; software APM
+  off). Without hardware AEC it falls back to WebRTC **AEC3**
+  (`mobile_mode=false`, adaptive delay estimator) over the unprocessed
+  `VOICE_RECOGNITION` source. Speaker is forced as the communication device
+  only when no external device is attached; system routing wins otherwise.
+* Serialize every APM native-pointer use and destruction behind one monitor:
+  `release()` now waits out an in-flight `processCapture`/`processRender`
+  (writer-thread render tap + IO-coroutine capture vs main-thread teardown was
+  a native use-after-free window), and post-release calls no-op.
+* Evidence-based full-duplex trust: the read-back now carries `erleDb` (the
+  APM's measured echo-return-loss-enhancement) + `apmMode`, `platform_aec` is
+  claimed only for a verifiably-attached hardware canceller, and Dart
+  `trustsFullDuplex` on the software path requires `erleDb ≥ 6.0` — a running
+  canceller is not a cancelling one.
+* Add the on-device AEC loopback acceptance gate
+  (`example/integration_test/aec_loopback_test.dart`): speaker plays a
+  synthesized voice-band reference while the mic records; asserts the played
+  signal does not survive into capture (normalized cross-correlation) and
+  that the mechanism/ERLE read-back proves itself. This is the test the dead
+  March→July AEC would have failed on day one.
+
 ## 0.0.15
 
 * Fix Android echo cancellation: feed the WebRTC APM far-end (render) reference

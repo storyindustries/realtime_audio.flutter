@@ -2,4 +2,9 @@
   package="dev.volskaya.realtime_audio">
 
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <!-- Voice-call audio session: MODE_IN_COMMUNICATION, communication-device
+         routing, legacy speakerphone/SCO. Declared here so manifest-merger
+         grants it to every consumer - without it the platform echo path
+         silently fails to configure (adversarial review P1). -->
+    <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
 </manifest>
