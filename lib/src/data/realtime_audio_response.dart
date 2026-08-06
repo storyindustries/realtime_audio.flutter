@@ -21,5 +21,6 @@ abstract class RealtimeAudioResponse with _$RealtimeAudioResponse {
   }) = RealtimeAudioResponseRequestRecordPermission;
   //
 
-  factory RealtimeAudioResponse.fromJson(Map<String, dynamic> json) => _$RealtimeAudioResponseFromJson(json);
+  factory RealtimeAudioResponse.fromJson(Map<String, dynamic> json) =>
+      _$RealtimeAudioResponseFromJson(json);
 }

@@ -24,17 +24,22 @@ abstract class RealtimeAudioArguments with _$RealtimeAudioArguments {
     required String id,
   }) = _RealtimeAudioArgumentsDestroy;
 
-  const factory RealtimeAudioArguments.getRecordPermission() = _RealtimeAudioArgumentsGetRecordPermission;
-  const factory RealtimeAudioArguments.requestRecordPermission() = _RealtimeAudioArgumentsRequestRecordPermission;
+  const factory RealtimeAudioArguments.getRecordPermission() =
+      _RealtimeAudioArgumentsGetRecordPermission;
+  const factory RealtimeAudioArguments.requestRecordPermission() =
+      _RealtimeAudioArgumentsRequestRecordPermission;
 
   //
 
   const RealtimeAudioArguments._();
-  factory RealtimeAudioArguments.fromJson(Map<String, dynamic> json) => _$RealtimeAudioArgumentsFromJson(json);
+  factory RealtimeAudioArguments.fromJson(Map<String, dynamic> json) =>
+      _$RealtimeAudioArgumentsFromJson(json);
 
   //
 
-  Future<T> invoke<T extends RealtimeAudioResponse>(MethodChannel channel) async {
+  Future<T> invoke<T extends RealtimeAudioResponse>(
+    MethodChannel channel,
+  ) async {
     final json = toJson();
     final runtimeType = json.remove('runtimeType');
     final map = await channel.invokeMethod(runtimeType, json);

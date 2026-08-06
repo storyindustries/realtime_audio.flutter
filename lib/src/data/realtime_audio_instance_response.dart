@@ -5,7 +5,8 @@ part 'realtime_audio_instance_response.freezed.dart';
 part 'realtime_audio_instance_response.g.dart';
 
 @freezed
-abstract class RealtimeAudioInstanceResponse with _$RealtimeAudioInstanceResponse {
+abstract class RealtimeAudioInstanceResponse
+    with _$RealtimeAudioInstanceResponse {
   const factory RealtimeAudioInstanceResponse.clearQueue({
     RealtimeAudioClearQueueChunkData? chunk,
 
@@ -20,7 +21,8 @@ abstract class RealtimeAudioInstanceResponse with _$RealtimeAudioInstanceRespons
 }
 
 @freezed
-abstract class RealtimeAudioClearQueueChunkData with _$RealtimeAudioClearQueueChunkData {
+abstract class RealtimeAudioClearQueueChunkData
+    with _$RealtimeAudioClearQueueChunkData {
   RealtimeAudioClearQueueChunkData._();
 
   factory RealtimeAudioClearQueueChunkData({
@@ -32,14 +34,19 @@ abstract class RealtimeAudioClearQueueChunkData with _$RealtimeAudioClearQueueCh
     required int chunkSampleTimeTotal,
   }) = _RealtimeAudioClearQueueChunkData;
 
-  factory RealtimeAudioClearQueueChunkData.fromJson(Map<String, dynamic> json) =>
-      _$RealtimeAudioClearQueueChunkDataFromJson(json);
+  factory RealtimeAudioClearQueueChunkData.fromJson(
+    Map<String, dynamic> json,
+  ) => _$RealtimeAudioClearQueueChunkDataFromJson(json);
 
   //
 
   @override
-  late final chunkElapsed = Duration(milliseconds: (chunkSampleTime / sampleRate * 1000).round());
+  late final chunkElapsed = Duration(
+    milliseconds: (chunkSampleTime / sampleRate * 1000).round(),
+  );
 
   @override
-  late final elapsed = Duration(milliseconds: (sampleTime / sampleRate * 1000).round());
+  late final elapsed = Duration(
+    milliseconds: (sampleTime / sampleRate * 1000).round(),
+  );
 }
