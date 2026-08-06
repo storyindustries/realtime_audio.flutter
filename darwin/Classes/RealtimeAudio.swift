@@ -154,7 +154,8 @@ class RealtimeAudio: NSObject {
       outputFormat: outputFormat,
       callbackQueue: nativeQueue
     )
-    audioBackgroundNode = arguments.backgroundEnabled
+    audioBackgroundNode =
+      arguments.backgroundEnabled
       ? try LoopAudioPlayerNode(
         inputFormat: playerInputFormat,
         outputFormat: outputFormat,
@@ -199,9 +200,11 @@ class RealtimeAudio: NSObject {
     audioEngine.attach(equalizer)
 
     audioEngine.connect(audioPlayerNode, to: equalizer, format: playerOutputFormat)
-    audioEngine.connect(equalizer, to: audioMixerNode, fromBus: 0, toBus: 0, format: playerOutputFormat)
+    audioEngine.connect(
+      equalizer, to: audioMixerNode, fromBus: 0, toBus: 0, format: playerOutputFormat)
     if let audioBackgroundNode {
-      audioEngine.connect(audioBackgroundNode, to: audioMixerNode, fromBus: 0, toBus: 1, format: playerOutputFormat)
+      audioEngine.connect(
+        audioBackgroundNode, to: audioMixerNode, fromBus: 0, toBus: 1, format: playerOutputFormat)
     }
 
     audioEngine.connect(audioMixerNode, to: audioEngine.mainMixerNode, format: nil)
@@ -505,7 +508,8 @@ class RealtimeAudio: NSObject {
       type: "output_route_selection_failed",
       engineWasRunning: audioEngine.isRunning,
       message: message,
-      outputRoute: audioSession.outputRouteClass
+      outputRoute: audioSession.outputRouteClass,
+      outputSampleRate: Int((audioSession.sampleRate ?? playerSampleRate).rounded())
     )
   }
 
@@ -554,7 +558,9 @@ class RealtimeAudio: NSObject {
     try audioSession.deactivate()
   }
 
-  private func getRecorderConverter(_ from: AVAudioFormat, _ to: AVAudioFormat) throws -> AVAudioConverter {
+  private func getRecorderConverter(_ from: AVAudioFormat, _ to: AVAudioFormat) throws
+    -> AVAudioConverter
+  {
     guard let converter = AVAudioConverter(from: from, to: to) else {
       throw TextError("Failed to create an AVAudioConverter.")
     }
@@ -723,7 +729,9 @@ extension RealtimeAudio {
     }
   }
 
-  private func handleFlutterMethodSafe(call: FlutterMethodCall, result: @escaping FlutterResult) throws {
+  private func handleFlutterMethodSafe(call: FlutterMethodCall, result: @escaping FlutterResult)
+    throws
+  {
     var value: Any? = true
 
     switch call.method {
@@ -731,7 +739,9 @@ extension RealtimeAudio {
       guard let arguments = call.arguments as? [String: Any] else {
         throw TextError("Missing arguments for \(call.method)")
       }
-      guard let id = arguments["id"] as? String else { throw TextError("Missing id for: \(call.method).") }
+      guard let id = arguments["id"] as? String else {
+        throw TextError("Missing id for: \(call.method).")
+      }
       guard let data = arguments["data"] as? FlutterStandardTypedData else {
         throw TextError("Missing data for: \(call.method).")
       }
@@ -756,7 +766,8 @@ extension RealtimeAudio {
       guard let expectedScheduledMs = arguments["expectedScheduledMs"] as? Int else {
         throw TextError("Missing expectedScheduledMs for: \(call.method).")
       }
-      let outcome = audioPlayerNode.repairPlaybackAccounting(expectedScheduledMs: expectedScheduledMs)
+      let outcome = audioPlayerNode.repairPlaybackAccounting(
+        expectedScheduledMs: expectedScheduledMs)
       notifyPlayerState(isPaused: nil)
       value = [
         "repaired": outcome == .repaired,
@@ -815,8 +826,12 @@ extension RealtimeAudio {
         throw TextError("Missing arguments for \(call.method)")
       }
 
-      guard let id = arguments["id"] as? String else { throw TextError("Missing id for: \(call.method).") }
-      guard let loop = (arguments["loop"] as? Bool) else { throw TextError("Missing loop for: \(call.method).") }
+      guard let id = arguments["id"] as? String else {
+        throw TextError("Missing id for: \(call.method).")
+      }
+      guard let loop = (arguments["loop"] as? Bool) else {
+        throw TextError("Missing loop for: \(call.method).")
+      }
       guard let data = arguments["data"] as? FlutterStandardTypedData else {
         throw TextError("Missing data for: \(call.method).")
       }
@@ -863,7 +878,8 @@ extension RealtimeAudio {
     // A true wedge is destructive by definition: the independent render clock
     // is frozen and scheduled audio cannot progress. Fold the clock and discard
     // the stranded player queue before restoring readiness.
-    let recoveryDecision = PlaybackWedgeRecoveryPolicy.decide(engineIsRunning: audioEngine.isRunning)
+    let recoveryDecision = PlaybackWedgeRecoveryPolicy.decide(
+      engineIsRunning: audioEngine.isRunning)
     stopAudio()
     if recoveryDecision == .discardPlayerAndRestartEngine {
       audioEngine.prepare()
@@ -952,7 +968,8 @@ extension RealtimeAudio {
     let inputFormat = input.inputFormat(forBus: recorderPreferredBus)
     let ratio: Float = Float(inputFormat.sampleRate) / Float(recorderFormat.sampleRate)
     let converter = try getRecorderConverter(inputFormat, recorderFormat)
-    let bufferSize = AVAudioFrameCount(inputFormat.sampleRate * Double(arguments.recorderChunkInterval) / 1000)
+    let bufferSize = AVAudioFrameCount(
+      inputFormat.sampleRate * Double(arguments.recorderChunkInterval) / 1000)
     var hasReportedLiveBuffer = false
 
     input.installTap(
@@ -992,7 +1009,9 @@ extension RealtimeAudio {
         }
       }
 
-      if self.recorderFormat.commonFormat == AVAudioCommonFormat.pcmFormatInt16 && status == .haveData {
+      if self.recorderFormat.commonFormat == AVAudioCommonFormat.pcmFormatInt16
+        && status == .haveData
+      {
         self.handleRecorderData(buffer)
       }
     }
@@ -1043,7 +1062,8 @@ extension RealtimeAudio {
     #endif
 
     // Send the list to Flutter.
-    let flutterData = FlutterStandardTypedData(bytes: NSData(bytes: data, length: data.count) as Data)
+    let flutterData = FlutterStandardTypedData(
+      bytes: NSData(bytes: data, length: data.count) as Data)
     let volume = [buffer].getDbfs(0, Int(buffer.frameLength))
 
     DispatchQueue.main.async { [weak self] in

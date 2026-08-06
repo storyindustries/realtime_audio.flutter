@@ -60,7 +60,7 @@ enum RealtimeAudioPlatformErrorCode: String, Equatable {
 }
 
 enum IOSAudioErrorClassifier {
-  static let insufficientPriorityOSStatus = 561_017_449 // '!pri'
+  static let insufficientPriorityOSStatus = 561_017_449  // '!pri'
 
   static func code(domain: String, osStatus: Int) -> RealtimeAudioPlatformErrorCode {
     domain == NSOSStatusErrorDomain && osStatus == insufficientPriorityOSStatus

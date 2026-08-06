@@ -119,6 +119,7 @@ class RealtimeAudio(
                 "queuedChunkCount" to 0,
                 "message" to "Requested output route was not applied.",
                 "outputRoute" to routeState.active?.wire,
+                "outputSampleRate" to playerOutputFormat.sampleRate,
               ),
             )
           }
