@@ -1,10 +1,13 @@
 package dev.volskaya.realtime_audio
 
 import android.media.AudioAttributes
+import android.content.Context
 import android.media.AudioDeviceInfo
 import android.media.AudioFocusRequest
 import android.media.AudioManager
 import android.os.Build
+import android.os.Handler
+import android.os.Looper
 import android.util.Log
 
 /** Pure speaker-forcing decision for the communication route (unit-tested). */
@@ -26,9 +29,35 @@ object CommRoutePolicy {
    * system default. Speaker is forced only when no external device is present
    * — an external device (headset/BT/USB/hearing aid) keeps system routing.
    */
-  fun forcedCommunicationDeviceType(availableTypes: List<Int>): Int? {
-    if (availableTypes.any { it in EXTERNAL_TYPES }) return null
-    return AudioDeviceInfo.TYPE_BUILTIN_SPEAKER.takeIf { it in availableTypes }
+  fun routeForType(type: Int): OutputRoute = when (type) {
+    AudioDeviceInfo.TYPE_BUILTIN_SPEAKER -> OutputRoute.SPEAKER
+    AudioDeviceInfo.TYPE_BUILTIN_EARPIECE -> OutputRoute.RECEIVER
+    AudioDeviceInfo.TYPE_BLUETOOTH_SCO,
+    AudioDeviceInfo.TYPE_BLUETOOTH_A2DP,
+    AudioDeviceInfo.TYPE_BLE_HEADSET,
+    AudioDeviceInfo.TYPE_BLE_SPEAKER,
+    AudioDeviceInfo.TYPE_HEARING_AID -> OutputRoute.BLUETOOTH
+    AudioDeviceInfo.TYPE_WIRED_HEADSET,
+    AudioDeviceInfo.TYPE_WIRED_HEADPHONES,
+    AudioDeviceInfo.TYPE_USB_HEADSET,
+    AudioDeviceInfo.TYPE_USB_DEVICE -> OutputRoute.WIRED
+    else -> OutputRoute.OTHER
+  }
+
+  fun desiredCommunicationDeviceType(
+    requested: OutputRoute?,
+    activeType: Int?,
+    availableTypes: List<Int>,
+  ): Int? {
+    if (requested != null) {
+      return availableTypes.firstOrNull { routeForType(it) == requested }
+    }
+    if (activeType != null && activeType in availableTypes && activeType in EXTERNAL_TYPES) {
+      return activeType
+    }
+    return availableTypes.firstOrNull { routeForType(it) == OutputRoute.BLUETOOTH }
+      ?: availableTypes.firstOrNull { routeForType(it) == OutputRoute.WIRED }
+      ?: AudioDeviceInfo.TYPE_BUILTIN_SPEAKER.takeIf { it in availableTypes }
   }
 }
 
@@ -56,7 +85,7 @@ class CommSessionLedger {
 
 /**
  * Owns the AudioManager voice-call state for the platform echo path
- * (2026-07-24 Android echo RCA): MODE_IN_COMMUNICATION + audio focus for the
+ * MODE_IN_COMMUNICATION + audio focus for the
  * call's duration, speaker as the communication device when no external device
  * is attached (comm mode defaults to the earpiece on phones), legacy Bluetooth
  * SCO on pre-31 (voice audio does not auto-route to BT there), all restored on
@@ -72,9 +101,14 @@ class CommSessionLedger {
  * without voice-call routing has no far-end reference and cancels nothing.
  */
 class VoiceCallAudioSession(
+  context: Context,
   private val audioManager: AudioManager,
   private val ledger: CommSessionLedger = sharedLedger,
+  handler: Handler = Handler(Looper.getMainLooper()),
+  onOutputStateChanged: (OutputRouteState) -> Unit = {},
 ) {
+  private val audioSystem = AndroidCommunicationAudioSystem(context, audioManager, handler)
+  private val outputRoutes = OutputRouteController(audioSystem, onOutputStateChanged)
   private var active = false
   private var focusRequest: AudioFocusRequest? = null
 
@@ -88,35 +122,13 @@ class VoiceCallAudioSession(
     if (!ledger.acquire()) {
       // Another engine already configured the process-global state.
       configurationApplied = true
+      outputRoutes.start()
       return true
     }
     configurationApplied = runCatching {
       audioManager.mode = AudioManager.MODE_IN_COMMUNICATION
       requestFocus()
-      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-        val available = audioManager.availableCommunicationDevices
-        val forcedType = CommRoutePolicy.forcedCommunicationDeviceType(available.map { it.type })
-        if (forcedType != null) {
-          available.firstOrNull { it.type == forcedType }?.let { audioManager.setCommunicationDevice(it) }
-        }
-      } else {
-        @Suppress("DEPRECATION")
-        val externalPresent =
-          audioManager.isWiredHeadsetOn || audioManager.isBluetoothScoOn || audioManager.isBluetoothA2dpOn
-        if (externalPresent) {
-          // Pre-31 voice audio does not auto-route to Bluetooth: SCO must be
-          // started explicitly (best-effort; connection completes async).
-          @Suppress("DEPRECATION")
-          if (audioManager.isBluetoothScoAvailableOffCall) {
-            @Suppress("DEPRECATION")
-            audioManager.startBluetoothSco()
-            audioManager.isBluetoothScoOn = true
-          }
-        } else {
-          @Suppress("DEPRECATION")
-          audioManager.isSpeakerphoneOn = true
-        }
-      }
+      outputRoutes.start()
       true
     }.onFailure { e ->
       runCatching { Log.e(TAG, "voice-call session enter failed: ${e.message}") }
@@ -127,26 +139,27 @@ class VoiceCallAudioSession(
   fun exit() {
     if (!active) return
     active = false
+    outputRoutes.stop()
     val restore = ledger.release()
     configurationApplied = false
     if (!restore) return
     runCatching {
       abandonFocus()
-      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-        audioManager.clearCommunicationDevice()
-      } else {
-        @Suppress("DEPRECATION")
-        if (audioManager.isBluetoothScoOn) {
-          @Suppress("DEPRECATION")
-          audioManager.stopBluetoothSco()
-          audioManager.isBluetoothScoOn = false
-        }
-        @Suppress("DEPRECATION")
-        audioManager.isSpeakerphoneOn = false
-      }
+      audioSystem.clearDevice()
       audioManager.mode = AudioManager.MODE_NORMAL
     }.onFailure { e -> runCatching { Log.w(TAG, "voice-call session exit failed: ${e.message}") } }
   }
+
+  fun setPlaybackAttributes(attributes: AudioAttributes) {
+    audioSystem.setPlaybackAttributes(attributes)
+  }
+
+  fun outputRouteState(): OutputRouteState = outputRoutes.snapshot()
+
+  fun selectOutputRoute(route: OutputRoute?): OutputRouteState = outputRoutes.select(route)
+
+  fun ensureMinimumPlaybackVolume(minimum: Double): OutputRouteState =
+    outputRoutes.ensureMinimumVolume(minimum)
 
   /// A voice call owns audio focus: other apps' media pauses/ducks (an
   /// uncancellable echo source otherwise) and the OS tells them we're live.

@@ -73,6 +73,7 @@ class RealtimeAudio(
     .setChannelMask(AudioFormat.CHANNEL_OUT_MONO)
     .setSampleRate(arguments.playerSampleRate)
     .build()
+  private lateinit var playbackAudioAttributes: AudioAttributes
 
   private var recorderData: ShortArray? = null
   private var recorder: AudioRecord?
@@ -86,8 +87,8 @@ class RealtimeAudio(
   /// Frame-aligns the write-time far-end feed into [webRtcApm] (null when no APM).
   private var renderFeeder: ApmRenderFeeder? = null
 
-  /// The echo-control architecture this engine is running (2026-07-24 Android
-  /// echo RCA): platform voice-call path with hardware AEC when the device
+  /// The echo-control architecture this engine is running: platform voice-call
+  /// path with hardware AEC when the device
   /// offers it, software AEC3 fallback otherwise. See [EchoPathPolicy].
   private var echoDecision: EchoPathDecision = EchoPathPolicy.decide(
     voiceProcessing = false,
@@ -103,7 +104,27 @@ class RealtimeAudio(
   /// media-usage track the HAL AEC never references.
   private var playbackOnVoicePath: Boolean = false
   private val voiceCallSession = VoiceCallAudioSession(
+    context,
     context.getSystemService(Context.AUDIO_SERVICE) as AudioManager,
+    onOutputStateChanged = { routeState ->
+      mainLooperHandler.post {
+        if (!isDisposed) {
+          methodChannel.invokeMethod("outputRouteState", routeState.toMap())
+          if (routeState.selectionResult == OutputRouteSelectionResult.FAILED) {
+            methodChannel.invokeMethod(
+              "audioEngineHealth",
+              mapOf(
+                "type" to "output_route_selection_failed",
+                "engineWasRunning" to shouldBeRunning,
+                "queuedChunkCount" to 0,
+                "message" to "Requested output route was not applied.",
+                "outputRoute" to routeState.active?.wire,
+              ),
+            )
+          }
+        }
+      }
+    },
   )
 
   private var isRunning = false
@@ -133,7 +154,11 @@ class RealtimeAudio(
     //setPerformanceMode
 
     echoDecision = decideEchoPath(recorderEnabled = arguments.recorderEnabled)
-    if (arguments.recorderEnabled && echoDecision.communicationMode) {
+    if (OutputRouteActivationPolicy.shouldActivate(
+        recorderEnabled = arguments.recorderEnabled,
+        voiceProcessingRequested = arguments.voiceProcessing,
+        communicationMode = echoDecision.communicationMode,
+      )) {
       val commActive = voiceCallSession.enter()
       if (!commActive && echoDecision.attachHardwareAec) {
         // A hardware AEC without an established voice-call context has no
@@ -142,7 +167,10 @@ class RealtimeAudio(
         echoDecision = decideEchoPath(recorderEnabled = true, hardwareAecAvailable = false)
       }
     }
+    if (!echoDecision.communicationMode) voiceCallSession.exit()
     playbackOnVoicePath = echoDecision.voiceCommunicationPlayback
+    playbackAudioAttributes = buildPlaybackAudioAttributes()
+    voiceCallSession.setPlaybackAttributes(playbackAudioAttributes)
     try {
       recorder = if (arguments.recorderEnabled) getRecorder(echoDecision.captureSource) else null
       if (arguments.recorderEnabled) {
@@ -363,6 +391,21 @@ class RealtimeAudio(
         }
       }
       "getEchoCancellationState" -> value = echoCancellationStateMap()
+      "getOutputRouteState" -> value = voiceCallSession.outputRouteState().toMap()
+      "setOutputRoute" -> {
+        val routeValue = call.argument<String?>("route")
+        val route = if (routeValue == null) null else OutputRoute.fromWire(routeValue)
+          ?: throw Error("Unknown output route '$routeValue'.")
+        value = voiceCallSession.selectOutputRoute(route).toMap()
+      }
+      "ensureMinimumPlaybackVolume" -> {
+        val minimum = call.argument<Double>("minimum")
+          ?: throw Error("Missing minimum for ${call.method}.")
+        require(minimum.isFinite() && minimum in 0.0..1.0) {
+          "minimum must be between 0 and 1."
+        }
+        value = voiceCallSession.ensureMinimumPlaybackVolume(minimum).toMap()
+      }
 
       "start" -> start()
       "pause" -> pause()
@@ -477,24 +520,23 @@ class RealtimeAudio(
 
   //
 
+  private fun buildPlaybackAudioAttributes(): AudioAttributes =
+    if (echoDecision.voiceCommunicationPlayback) {
+      AudioAttributes.Builder()
+        .setUsage(AudioAttributes.USAGE_VOICE_COMMUNICATION)
+        .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+        .build()
+    } else {
+      AudioAttributes.Builder()
+        .setLegacyStreamType(AudioManager.STREAM_MUSIC)
+        .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
+        .setUsage(AudioAttributes.USAGE_MEDIA)
+        .build()
+    }
+
   private fun getAudioTrack(audioSessionId: Int? = null) =
     ChunkAudioTrack(
-      if (echoDecision.voiceCommunicationPlayback) {
-        // The platform voice-call path: voice-usage playback routes through
-        // the primary (low-latency) output AND lands in the HAL AEC's far-end
-        // reference — a media-usage track on many OEMs does neither
-        // (2026-07-24 Android echo RCA).
-        AudioAttributes.Builder()
-          .setUsage(AudioAttributes.USAGE_VOICE_COMMUNICATION)
-          .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
-          .build()
-      } else {
-        AudioAttributes.Builder()
-          .setLegacyStreamType(AudioManager.STREAM_MUSIC)
-          .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
-          .setUsage(AudioAttributes.USAGE_MEDIA)
-          .build()
-      },
+      playbackAudioAttributes,
       playerOutputFormat,
       playerOutputFormat.getMinBufferSizeTrack(),
       AudioTrack.MODE_STREAM,
@@ -739,7 +781,12 @@ class RealtimeAudio(
 
     if (enabled) {
       var decision = decideEchoPath(recorderEnabled = true)
-      val commActive = if (decision.communicationMode) voiceCallSession.enter() else true
+      val activateRoute = OutputRouteActivationPolicy.shouldActivate(
+        recorderEnabled = true,
+        voiceProcessingRequested = arguments.voiceProcessing,
+        communicationMode = decision.communicationMode,
+      )
+      val commActive = if (activateRoute) voiceCallSession.enter() else true
       // A hardware AEC without an established voice-call context, or over a
       // playback track built on the media path (engine constructed
       // recorder-disabled), has no far-end reference — take the software
@@ -747,18 +794,13 @@ class RealtimeAudio(
       if (decision.attachHardwareAec && (!commActive || !playbackOnVoicePath)) {
         decision = decideEchoPath(recorderEnabled = true, hardwareAecAvailable = false)
       }
+      if (!decision.communicationMode) voiceCallSession.exit()
       echoDecision = decision
       try {
         recorder = getRecorder(decision.captureSource)
         setupEchoControl()
       } catch (e: Throwable) {
-        // Roll back to the DISABLED posture so a later retry re-attempts.
-        // Committing `isRecorderEnabled` before the fallible work wedged the
-        // engine permanently on a transient AudioRecord failure: the toggle
-        // guard turned every retry into a no-op over a null recorder (dead
-        // mic for the engine's life — adversarial review D1). The comm
-        // session stays held, matching the disabled posture; dispose() owns
-        // its release.
+        // Roll back to the disabled posture so a later retry re-attempts.
         runCatching { recorder?.release() }
         recorder = null
         recorderData = null
@@ -768,6 +810,7 @@ class RealtimeAudio(
         webRtcApm = null
         audioTrack.renderTap = null
         renderFeeder = null
+        voiceCallSession.exit()
         throw e
       }
       isRecorderEnabled = true
@@ -775,9 +818,7 @@ class RealtimeAudio(
       if (isRunning) startRecording()
     } else {
       isRecorderEnabled = false
-      // Release recorder + hardware effects + APM, leave the voice-call
-      // audio-manager state (a playback tail may still be draining and the
-      // recorder can come right back — recoverRecorder(); dispose() exits it).
+      voiceCallSession.exit()
       stopRecording()
       recorder?.release()
       recorder = null

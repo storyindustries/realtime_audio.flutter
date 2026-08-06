@@ -254,6 +254,16 @@ void main() {
         );
         expect(drained.outputRoute, 'bluetooth');
         expect(drained.outputSampleRate, 48_000);
+
+        final routeFailure = RealtimeAudioEngineHealthEvent.fromMap(const {
+          'type': 'output_route_selection_failed',
+          'engineWasRunning': true,
+          'queuedChunkCount': 0,
+        });
+        expect(
+          routeFailure.type,
+          RealtimeAudioEngineHealthEventType.outputRouteSelectionFailed,
+        );
       },
     );
 

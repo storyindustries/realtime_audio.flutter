@@ -5,6 +5,7 @@ enum RealtimeAudioEngineHealthEventType {
   configurationChangeRecoveryFailed,
   playbackDrainSignalFailed,
   playbackQueueDrained,
+  outputRouteSelectionFailed,
   unknown;
 
   static RealtimeAudioEngineHealthEventType fromWire(String value) {
@@ -18,6 +19,7 @@ enum RealtimeAudioEngineHealthEventType {
         configurationChangeRecoveryFailed,
       'playback_drain_signal_failed' => playbackDrainSignalFailed,
       'playback_queue_drained' => playbackQueueDrained,
+      'output_route_selection_failed' => outputRouteSelectionFailed,
       _ => unknown,
     };
   }

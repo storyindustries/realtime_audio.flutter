@@ -33,6 +33,7 @@ class RealtimeAudio: NSObject {
   private var playerOutputFormat: AVAudioFormat!
 
   private let audioSession = RealtimeAudioSession()
+  private lazy var audioOutput = IOSAudioOutputController(session: audioSession)
   private let audioEngine = AVAudioEngine()
   private let audioMixerNode = AVAudioMixerNode()
   private var audioPlayerNode: ChunkAudioPlayerNode!
@@ -257,7 +258,6 @@ class RealtimeAudio: NSObject {
     guard !observersAttached else { return }
     observersAttached = true
     #if os(iOS)
-      audioSession.instance.addObserver(self, forKeyPath: "outputVolume", options: .new, context: nil)
       NotificationCenter.default.addObserver(
         self,
         selector: #selector(handleAudioRouteChange),
@@ -283,9 +283,6 @@ class RealtimeAudio: NSObject {
     guard observersAttached else { return }
     observersAttached = false
     NotificationCenter.default.removeObserver(self)
-    #if os(iOS)
-      audioSession.instance.removeObserver(self, forKeyPath: "outputVolume")
-    #endif
   }
 
   /// Flutter's binary messenger owns handler registration on the platform
@@ -347,6 +344,17 @@ class RealtimeAudio: NSObject {
       nativeQueue.async { [weak self] in
         guard let self, !isDisposed else { return }
         audioCaptureStrategy = negotiateAudioCaptureStrategy(recorderEnabled: isRecorderEnabled)
+        let rawReason = notification.userInfo?[AVAudioSessionRouteChangeReasonKey] as? UInt
+        let reason = rawReason.flatMap(AVAudioSession.RouteChangeReason.init(rawValue:))
+        reportOutputRouteFailure(
+          audioOutput.handleRouteChange(
+            reason: reason,
+            voiceProcessingActive: audioCaptureStrategy == .inputVoiceProcessing,
+            routeSelectionAvailable: isRecorderEnabled,
+            engineIsStarted: shouldBeStarted
+          )
+        )
+        notifyOutputRouteState()
       }
     }
 
@@ -445,6 +453,7 @@ class RealtimeAudio: NSObject {
         removeRecorderTap()
       },
       resumePreservedPlayback: {
+        applyPostStartOutputPolicy()
         playBackground()
         AudioEngineConfigurationRecovery.resumePreservedPlayback(
           shouldRestart: true,
@@ -462,10 +471,42 @@ class RealtimeAudio: NSObject {
   }
 
   private func changeVolume() {
-    if !isRecorderEnabled { return }
     #if os(iOS)
-      audioEngine.mainMixerNode.outputVolume = audioSession.instance.outputVolume
+      audioEngine.mainMixerNode.outputVolume = IOSPlaybackGainPolicy.mainMixerGain(
+        systemOutputVolume: audioSession.systemOutputVolume
+      )
     #endif
+  }
+
+  private func outputRouteStateMap() -> [String: Any] {
+    audioOutput.stateMap()
+  }
+
+  private func notifyOutputRouteState() {
+    invokeFlutter("outputRouteState", arguments: outputRouteStateMap())
+  }
+
+  private func applyPostStartOutputPolicy() {
+    changeVolume()
+    #if os(iOS)
+      reportOutputRouteFailure(
+        audioOutput.applyPostStart(
+          voiceProcessingActive: audioCaptureStrategy == .inputVoiceProcessing,
+          routeSelectionAvailable: isRecorderEnabled
+        )
+      )
+    #endif
+    notifyOutputRouteState()
+  }
+
+  private func reportOutputRouteFailure(_ message: String?) {
+    guard let message else { return }
+    notifyEngineHealth(
+      type: "output_route_selection_failed",
+      engineWasRunning: audioEngine.isRunning,
+      message: message,
+      outputRoute: audioSession.outputRouteClass
+    )
   }
 
   deinit {
@@ -511,27 +552,6 @@ class RealtimeAudio: NSObject {
       webRtcApm = nil
     #endif
     try audioSession.deactivate()
-  }
-
-  override func observeValue(
-    forKeyPath keyPath: String?,
-    of object: Any?,
-    change: [NSKeyValueChangeKey: Any]?,
-    context: UnsafeMutableRawPointer?
-  ) {
-    guard keyPath == "outputVolume" else { return }
-    nativeQueue.async { [weak self] in
-      guard let self, !isDisposed else { return }
-      #if os(iOS)
-        if audioEngine.mainMixerNode.outputVolume != audioSession.instance.outputVolume {
-          changeVolume()
-          invokeFlutter(
-            "echo",
-            arguments: "Volume changing to \(audioSession.instance.outputVolume)"
-          )
-        }
-      #endif
-    }
   }
 
   private func getRecorderConverter(_ from: AVAudioFormat, _ to: AVAudioFormat) throws -> AVAudioConverter {
@@ -749,6 +769,32 @@ extension RealtimeAudio {
       break
     case "getEchoCancellationState":
       value = echoCancellationStateMap()
+      break
+    case "getOutputRouteState":
+      value = outputRouteStateMap()
+      break
+    case "setOutputRoute":
+      #if os(iOS)
+        let arguments = call.arguments as? [String: Any]
+        let rawRoute = arguments?["route"] as? String
+        reportOutputRouteFailure(
+          audioOutput.setRequestedOutput(
+            rawRoute,
+            voiceProcessingActive: audioCaptureStrategy == .inputVoiceProcessing,
+            routeSelectionAvailable: isRecorderEnabled
+          )
+        )
+        notifyOutputRouteState()
+        value = outputRouteStateMap()
+      #else
+        value = outputRouteStateMap()
+      #endif
+      break
+    case "ensureMinimumPlaybackVolume":
+      // iOS system output volume is user-owned. Keep the engine mixer at unity
+      // and return the observable state without attempting a programmatic change.
+      changeVolume()
+      value = outputRouteStateMap()
       break
     //
     case "start":
@@ -1038,6 +1084,7 @@ extension RealtimeAudio {
   private func start() throws {
     try audioEngine.start()
     shouldBeStarted = true
+    applyPostStartOutputPolicy()
     playBackground()
     playAudio()
   }
@@ -1052,6 +1099,7 @@ extension RealtimeAudio {
   private func resume() throws {
     try audioEngine.start()
     shouldBePaused = false
+    applyPostStartOutputPolicy()
     playBackground()
     playAudio()
   }

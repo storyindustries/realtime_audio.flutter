@@ -109,3 +109,130 @@ enum RecorderStateTransition {
     commit(targetEnabled)
   }
 }
+
+enum IOSAudioOutputKind: String, Equatable {
+  case speaker
+  case receiver
+  case wired
+  case bluetooth
+  case airPlay
+  case other
+  case unknown
+
+  var isExternal: Bool {
+    switch self {
+    // Unknown output port types may be car or display routes. Preserve them;
+    // forcing speaker is safe only for known built-in outputs.
+    case .wired, .bluetooth, .airPlay, .other:
+      return true
+    case .speaker, .receiver, .unknown:
+      return false
+    }
+  }
+
+  var publicRouteValue: String {
+    switch self {
+    case .speaker, .receiver, .wired, .bluetooth:
+      return rawValue
+    case .airPlay, .other, .unknown:
+      return "other"
+    }
+  }
+}
+
+enum IOSAudioRouteOverrideAction: Equatable {
+  case clearOverride
+  case speaker
+}
+
+enum IOSAudioRouteSelectionAction: Equatable {
+  case clearPreferredInput
+  case preferInput(IOSAudioOutputKind)
+  case clearOverride
+  case speaker
+}
+
+enum IOSAudioOutputSelectionResult: String, Equatable {
+  case automatic
+  case applied
+  case failed
+  case unavailable
+}
+
+enum IOSAudioRouteChangeReason: Equatable {
+  case newDeviceAvailable
+  case oldDeviceUnavailable
+  case categoryChange
+  case override
+  case other
+}
+
+/// The system output volume is already applied by the hardware route. The
+/// engine mixer stays at unity so the same user-owned gain is never multiplied
+/// into the signal a second time.
+enum IOSPlaybackGainPolicy {
+  static func mainMixerGain(systemOutputVolume: Float) -> Float {
+    _ = systemOutputVolume
+    return 1
+  }
+}
+
+/// Pure audio-session shape shared by the AVFoundation adapter and tests.
+enum IOSAudioSessionProfile {
+  static func usesDefaultToSpeaker(
+    recorderEnabled: Bool,
+    voiceProcessingRequested: Bool
+  ) -> Bool {
+    recorderEnabled && !voiceProcessingRequested
+  }
+}
+
+/// Pure route policy. Hardware-specific code maps these finite actions to
+/// `overrideOutputAudioPort`, keeping notification handling deterministic.
+enum IOSAudioOutputPolicy {
+  static func manualSelectionResult(
+    requested: IOSAudioOutputKind,
+    commandAccepted: Bool,
+    active: IOSAudioOutputKind
+  ) -> IOSAudioOutputSelectionResult {
+    guard commandAccepted else { return .unavailable }
+    return active == requested ? .applied : .failed
+  }
+
+  static func manualSelectionActions(
+    _ output: IOSAudioOutputKind,
+    available: [IOSAudioOutputKind]
+  ) -> [IOSAudioRouteSelectionAction]? {
+    guard available.contains(output) else { return nil }
+    switch output {
+    case .speaker:
+      return [.clearPreferredInput, .speaker]
+    case .receiver:
+      return [.preferInput(.receiver), .clearOverride]
+    case .wired, .bluetooth:
+      return [.clearOverride, .preferInput(output)]
+    case .airPlay, .other, .unknown:
+      return nil
+    }
+  }
+
+  static func postStartActions(
+    currentOutput: IOSAudioOutputKind,
+    userSelection: IOSAudioOutputKind?
+  ) -> [IOSAudioRouteOverrideAction] {
+    guard userSelection == nil, !currentOutput.isExternal else { return [] }
+    return [.clearOverride, .speaker]
+  }
+
+  static func routeChangeActions(
+    currentOutput: IOSAudioOutputKind,
+    userSelection: IOSAudioOutputKind?,
+    reason: IOSAudioRouteChangeReason
+  ) -> [IOSAudioRouteOverrideAction] {
+    guard reason == .newDeviceAvailable || reason == .oldDeviceUnavailable else {
+      return []
+    }
+    guard userSelection == nil, !currentOutput.isExternal else { return [] }
+    return [.speaker]
+  }
+}
