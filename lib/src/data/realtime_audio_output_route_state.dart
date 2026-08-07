@@ -7,6 +7,8 @@ enum RealtimeAudioOutputRoute {
   receiver,
   wired,
   bluetooth,
+
+  /// Readback-only fallback for platform routes without a selectable category.
   other;
 
   static RealtimeAudioOutputRoute? fromWire(Object? value) => switch (value) {
@@ -51,6 +53,7 @@ class RealtimeAudioOutputRouteState {
     final available = (map['available'] as List<Object?>? ?? const [])
         .map(RealtimeAudioOutputRoute.fromWire)
         .whereType<RealtimeAudioOutputRoute>()
+        .where((route) => route != RealtimeAudioOutputRoute.other)
         .toList(growable: false);
     return RealtimeAudioOutputRouteState(
       active: RealtimeAudioOutputRoute.fromWire(map['active']),

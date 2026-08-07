@@ -173,6 +173,10 @@ final selection = await audio.setOutputRoute(RealtimeAudioOutputRoute.speaker);
 final raised = await audio.ensureMinimumPlaybackVolume(0.6);
 ```
 
+`other` is a readback-only fallback for platform routes without a public
+category. It is never included in `available`; selecting it returns
+`unavailable`.
+
 On Android, the minimum targets the stream derived from the exact playback
 `AudioAttributes`; voice calls therefore change call volume rather than media
 volume. On iOS, system output volume remains user-owned and the method is a

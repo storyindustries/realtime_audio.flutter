@@ -451,6 +451,7 @@ class RealtimeAudio {
       });
 
   /// Select an output category. Passing null restores automatic routing.
+  /// [RealtimeAudioOutputRoute.other] is readback-only and returns unavailable.
   Future<RealtimeAudioOutputRouteState?> setOutputRoute(
     RealtimeAudioOutputRoute? route,
   ) => _withInitAndLock(() async {

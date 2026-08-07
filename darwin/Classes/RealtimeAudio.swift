@@ -33,7 +33,20 @@ class RealtimeAudio: NSObject {
   private var playerOutputFormat: AVAudioFormat!
 
   private let audioSession = RealtimeAudioSession()
-  private lazy var audioOutput = IOSAudioOutputController(session: audioSession)
+  private lazy var audioOutput = IOSAudioOutputController(
+    session: audioSession,
+    scheduleTimeout: { [weak self] delay, action in
+      guard let self else { return {} }
+      let workItem = DispatchWorkItem(block: action)
+      self.nativeQueue.asyncAfter(deadline: .now() + delay, execute: workItem)
+      return { workItem.cancel() }
+    },
+    onAsyncUpdate: { [weak self] failure in
+      guard let self, !isDisposed else { return }
+      reportOutputRouteFailure(failure)
+      notifyOutputRouteState()
+    }
+  )
   private let audioEngine = AVAudioEngine()
   private let audioMixerNode = AVAudioMixerNode()
   private var audioPlayerNode: ChunkAudioPlayerNode!
@@ -348,7 +361,10 @@ class RealtimeAudio: NSObject {
         guard let self, !isDisposed else { return }
         audioCaptureStrategy = negotiateAudioCaptureStrategy(recorderEnabled: isRecorderEnabled)
         let rawReason = notification.userInfo?[AVAudioSessionRouteChangeReasonKey] as? UInt
-        let reason = rawReason.flatMap(AVAudioSession.RouteChangeReason.init(rawValue:))
+        let reason =
+          rawReason
+          .flatMap(AVAudioSession.RouteChangeReason.init(rawValue:))
+          .map(audioRouteChangeReason) ?? .other
         reportOutputRouteFailure(
           audioOutput.handleRouteChange(
             reason: reason,
@@ -476,14 +492,32 @@ class RealtimeAudio: NSObject {
   private func changeVolume() {
     #if os(iOS)
       audioEngine.mainMixerNode.outputVolume = IOSPlaybackGainPolicy.mainMixerGain(
-        systemOutputVolume: audioSession.systemOutputVolume
+        systemOutputVolume: audioSession.systemOutputVolume ?? 1
       )
     #endif
   }
 
   private func outputRouteStateMap() -> [String: Any] {
-    audioOutput.stateMap()
+    #if os(iOS)
+      return audioOutput.stateMap(routeSelectionAvailable: isRecorderEnabled)
+    #else
+      return audioOutput.stateMap(routeSelectionAvailable: false)
+    #endif
   }
+
+  #if os(iOS)
+    private func audioRouteChangeReason(
+      _ reason: AVAudioSession.RouteChangeReason
+    ) -> IOSAudioRouteChangeReason {
+      switch reason {
+      case .newDeviceAvailable: return .newDeviceAvailable
+      case .oldDeviceUnavailable: return .oldDeviceUnavailable
+      case .categoryChange: return .categoryChange
+      case .override: return .override
+      default: return .other
+      }
+    }
+  #endif
 
   private func notifyOutputRouteState() {
     invokeFlutter("outputRouteState", arguments: outputRouteStateMap())
@@ -1203,6 +1237,15 @@ extension RealtimeAudio {
       voiceProcessingRequested: arguments.voiceProcessing
     )
     try audioSession.activate()
+
+    #if os(iOS)
+      if enabled {
+        audioOutput.activate()
+      } else {
+        audioOutput.deactivate()
+      }
+      notifyOutputRouteState()
+    #endif
 
     #if os(iOS)
       if enabled && arguments.voiceProcessing && webRtcApm == nil {

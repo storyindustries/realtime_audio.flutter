@@ -10,6 +10,11 @@
   override while preserving external and explicit routes.
 * Report route-selection failures as typed engine-health events and expose the
   applicable coarse volume stream and normalized volume for diagnostics.
+* Reconcile asynchronous iOS route changes from native readback, retain explicit
+  routes safely across device changes, and clear stale route state on teardown.
+* Serialize process-global Android communication routing across overlapping
+  engines, report real queued audio in failure health, and keep `other`
+  readback-only.
 
 ## 0.0.17
 

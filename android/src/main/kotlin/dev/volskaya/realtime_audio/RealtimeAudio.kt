@@ -79,6 +79,7 @@ class RealtimeAudio(
   private var recorder: AudioRecord?
   private var isRecorderEnabled: Boolean = arguments.recorderEnabled
   private val audioTrack: ChunkAudioTrack
+  private var playerQueueSize: (() -> Int)? = null
   private val audioBackgroundTrack: LoopAudioTrack?
   private val audioManager: AudioManager = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
 
@@ -103,6 +104,7 @@ class RealtimeAudio(
   /// setRecorderEnabled(true) must not claim the hardware echo path over a
   /// media-usage track the HAL AEC never references.
   private var playbackOnVoicePath: Boolean = false
+  private val outputRouteFailureHealthGate = OutputRouteFailureHealthGate()
   private val voiceCallSession = VoiceCallAudioSession(
     context,
     context.getSystemService(Context.AUDIO_SERVICE) as AudioManager,
@@ -110,16 +112,14 @@ class RealtimeAudio(
       mainLooperHandler.post {
         if (!isDisposed) {
           methodChannel.invokeMethod("outputRouteState", routeState.toMap())
-          if (routeState.selectionResult == OutputRouteSelectionResult.FAILED) {
+          if (outputRouteFailureHealthGate.shouldEmit(routeState.selectionResult)) {
             methodChannel.invokeMethod(
               "audioEngineHealth",
-              mapOf(
-                "type" to "output_route_selection_failed",
-                "engineWasRunning" to shouldBeRunning,
-                "queuedChunkCount" to 0,
-                "message" to "Requested output route was not applied.",
-                "outputRoute" to routeState.active?.wire,
-                "outputSampleRate" to playerOutputFormat.sampleRate,
+              OutputRouteFailureHealthPayload.build(
+                engineWasRunning = shouldBeRunning,
+                queuedChunkCount = currentPlayerQueueSize(),
+                activeRoute = routeState.active?.wire,
+                outputSampleRate = playerOutputFormat.sampleRate,
               ),
             )
           }
@@ -127,6 +127,8 @@ class RealtimeAudio(
       }
     },
   )
+
+  private fun currentPlayerQueueSize(): Int = playerQueueSize?.invoke() ?: 0
 
   private var isRunning = false
   private var isDisposed = false
@@ -191,6 +193,7 @@ class RealtimeAudio(
     // recorder already enabled, so a later setRecorderEnabled(true) does not
     // re-create the track.
     audioTrack = getAudioTrack(audioSessionId)
+    playerQueueSize = { audioTrack.queue.size }
     audioBackgroundTrack = if (arguments.backgroundEnabled) getBackgroundTrack(audioSessionId) else null
     attachRenderTapIfNeeded()
 

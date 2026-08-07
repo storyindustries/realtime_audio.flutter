@@ -155,6 +155,7 @@ enum IOSAudioRouteSelectionAction: Equatable {
 enum IOSAudioOutputSelectionResult: String, Equatable {
   case automatic
   case applied
+  case pending
   case failed
   case unavailable
 }
@@ -165,6 +166,16 @@ enum IOSAudioRouteChangeReason: Equatable {
   case categoryChange
   case override
   case other
+}
+
+protocol IOSAudioOutputSession: AnyObject {
+  var outputKind: IOSAudioOutputKind { get }
+  var availableOutputKinds: [IOSAudioOutputKind] { get }
+  var systemOutputVolume: Float? { get }
+
+  func setOutput(_ output: IOSAudioOutputKind) throws -> Bool
+  func applyRouteSelectionActions(_ actions: [IOSAudioRouteSelectionAction]) throws -> Bool
+  func applyRouteOverrideActions(_ actions: [IOSAudioRouteOverrideAction]) throws
 }
 
 /// The system output volume is already applied by the hardware route. The
@@ -190,13 +201,32 @@ enum IOSAudioSessionProfile {
 /// Pure route policy. Hardware-specific code maps these finite actions to
 /// `overrideOutputAudioPort`, keeping notification handling deterministic.
 enum IOSAudioOutputPolicy {
+  static let automaticResetActions: [IOSAudioRouteSelectionAction] = [
+    .clearPreferredInput, .clearOverride,
+  ]
+
+  static func selectableOutputs(
+    from available: [IOSAudioOutputKind],
+    routeSelectionAvailable: Bool
+  ) -> [IOSAudioOutputKind] {
+    guard routeSelectionAvailable else { return [] }
+    return available.filter {
+      switch $0 {
+      case .speaker, .receiver, .wired, .bluetooth: return true
+      case .airPlay, .other, .unknown: return false
+      }
+    }
+  }
+
   static func manualSelectionResult(
     requested: IOSAudioOutputKind,
     commandAccepted: Bool,
-    active: IOSAudioOutputKind
+    active: IOSAudioOutputKind,
+    routeChangeObserved: Bool
   ) -> IOSAudioOutputSelectionResult {
     guard commandAccepted else { return .unavailable }
-    return active == requested ? .applied : .failed
+    if active == requested { return .applied }
+    return routeChangeObserved ? .failed : .pending
   }
 
   static func manualSelectionActions(
@@ -222,6 +252,14 @@ enum IOSAudioOutputPolicy {
   ) -> [IOSAudioRouteOverrideAction] {
     guard userSelection == nil, !currentOutput.isExternal else { return [] }
     return [.clearOverride, .speaker]
+  }
+
+  static func unavailableRequestFallbackActions(
+    currentOutput: IOSAudioOutputKind,
+    voiceProcessingActive: Bool
+  ) -> [IOSAudioRouteOverrideAction] {
+    guard voiceProcessingActive, !currentOutput.isExternal else { return [] }
+    return [.speaker]
   }
 
   static func routeChangeActions(

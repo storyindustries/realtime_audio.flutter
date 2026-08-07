@@ -273,6 +273,24 @@ class OutputRouteControllerTest {
   }
 
   @Test
+  fun `stop publishes an inactive snapshot that clears cached route state`() {
+    val states = mutableListOf<OutputRouteState>()
+    val system = FakeCommunicationAudioSystem(
+      available = mutableListOf(receiver(), speaker()),
+      active = receiver(),
+    )
+    val controller = OutputRouteController(system, states::add)
+    controller.start()
+
+    controller.stop()
+
+    val stopped = states.last()
+    assertNull(stopped.active)
+    assertEquals(emptyList(), stopped.available)
+    assertEquals(OutputRouteSelectionResult.UNAVAILABLE, stopped.selectionResult)
+  }
+
+  @Test
   fun `sco broadcasts distinguish connected and failed states`() {
     assertEquals(
       RouteEvent.CHANGED,
@@ -306,6 +324,17 @@ class OutputRouteControllerTest {
         availableTypes = listOf(
           AudioDeviceInfo.TYPE_BUILTIN_EARPIECE,
           AudioDeviceInfo.TYPE_BUILTIN_SPEAKER,
+        ),
+      ),
+    )
+    assertEquals(
+      AudioDeviceInfo.TYPE_HDMI,
+      CommRoutePolicy.desiredCommunicationDeviceType(
+        requested = null,
+        activeType = AudioDeviceInfo.TYPE_HDMI,
+        availableTypes = listOf(
+          AudioDeviceInfo.TYPE_BUILTIN_SPEAKER,
+          AudioDeviceInfo.TYPE_HDMI,
         ),
       ),
     )
@@ -379,6 +408,106 @@ class OutputRouteControllerTest {
         ),
       ),
     )
+  }
+
+  @Test
+  fun `pre 31 speaker override readback wins over connected wired inventory`() {
+    assertEquals(
+      OutputRoute.SPEAKER,
+      LegacyActiveRoutePolicy.resolve(
+        bluetoothScoActive = false,
+        speakerphoneOn = true,
+        wiredConnected = true,
+      ),
+    )
+  }
+
+  @Test
+  fun `pre 31 inventory excludes outputs that legacy routing cannot select`() {
+    assertEquals(
+      listOf(
+        AudioDeviceInfo.TYPE_BUILTIN_SPEAKER,
+        AudioDeviceInfo.TYPE_USB_HEADSET,
+        AudioDeviceInfo.TYPE_BLUETOOTH_SCO,
+      ),
+      LegacyRouteInventory.availableTypes(
+        connectedOutputTypes = listOf(
+          AudioDeviceInfo.TYPE_BUILTIN_EARPIECE,
+          AudioDeviceInfo.TYPE_BUILTIN_SPEAKER,
+          AudioDeviceInfo.TYPE_HDMI,
+          AudioDeviceInfo.TYPE_DOCK,
+          AudioDeviceInfo.TYPE_REMOTE_SUBMIX,
+          AudioDeviceInfo.TYPE_USB_HEADSET,
+          AudioDeviceInfo.TYPE_BLUETOOTH_SCO,
+          AudioDeviceInfo.TYPE_BLUETOOTH_A2DP,
+        ),
+      ),
+    )
+  }
+
+  @Test
+  fun `other route is readback only and cannot be selected`() {
+    val unknown = CommunicationDevice(4, AudioDeviceInfo.TYPE_HDMI)
+    val system = FakeCommunicationAudioSystem(
+      available = mutableListOf(unknown),
+      active = unknown,
+    )
+    val controller = OutputRouteController(system)
+    controller.start()
+
+    assertEquals(OutputRoute.OTHER, controller.snapshot().active)
+    assertFalse(controller.snapshot().available.contains(OutputRoute.OTHER))
+
+    val selection = controller.select(OutputRoute.OTHER)
+    assertEquals(OutputRoute.OTHER, selection.requested)
+    assertEquals(OutputRouteSelectionResult.UNAVAILABLE, selection.selectionResult)
+    assertEquals(0, system.setCalls)
+  }
+
+  @Test
+  fun `overlapping sessions share one route controller and one listener`() {
+    val firstSystem = FakeCommunicationAudioSystem(
+      available = mutableListOf(receiver(), speaker(), bluetooth()),
+      active = bluetooth(),
+    )
+    val secondSystem = FakeCommunicationAudioSystem(
+      available = mutableListOf(receiver(), speaker(), bluetooth()),
+      active = bluetooth(),
+    )
+    val firstStates = mutableListOf<OutputRouteState>()
+    val secondStates = mutableListOf<OutputRouteState>()
+    val shared = SharedOutputRouteController()
+
+    val first = shared.acquire(firstSystem, firstStates::add)
+    shared.select(OutputRoute.SPEAKER)
+    val second = shared.acquire(secondSystem, secondStates::add)
+
+    assertTrue(first.isFirst)
+    assertFalse(second.isFirst)
+    assertTrue(firstSystem.listenerRegistered)
+    assertFalse(secondSystem.listenerRegistered)
+    assertEquals(1, firstSystem.setCalls)
+    assertEquals(0, secondSystem.setCalls)
+    assertEquals(OutputRoute.SPEAKER, second.state.active)
+    assertEquals(OutputRoute.SPEAKER, secondStates.last().active)
+
+    val firstStateCount = firstStates.size
+    val afterFirstRelease = shared.release(first.lease)
+    assertFalse(afterFirstRelease.isLast)
+    assertTrue(firstSystem.listenerRegistered)
+
+    firstSystem.emitDevicesChanged()
+    assertEquals(firstStateCount, firstStates.size)
+    assertEquals(OutputRoute.SPEAKER, secondStates.last().active)
+    shared.select(OutputRoute.BLUETOOTH)
+    assertEquals(2, firstSystem.setCalls)
+    assertEquals(0, secondSystem.setCalls)
+
+    val afterLastRelease = shared.release(second.lease)
+    assertTrue(afterLastRelease.isLast)
+    assertFalse(firstSystem.listenerRegistered)
+    assertNull(afterLastRelease.state.active)
+    assertEquals(OutputRouteSelectionResult.UNAVAILABLE, afterLastRelease.state.selectionResult)
   }
 }
 

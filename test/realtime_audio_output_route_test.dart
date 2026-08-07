@@ -27,7 +27,6 @@ void main() {
       RealtimeAudioOutputRoute.receiver,
       RealtimeAudioOutputRoute.speaker,
       RealtimeAudioOutputRoute.bluetooth,
-      RealtimeAudioOutputRoute.other,
     ]);
     expect(state.requested, RealtimeAudioOutputRoute.bluetooth);
     expect(

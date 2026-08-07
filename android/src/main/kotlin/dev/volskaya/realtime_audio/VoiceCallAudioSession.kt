@@ -52,7 +52,9 @@ object CommRoutePolicy {
     if (requested != null) {
       return availableTypes.firstOrNull { routeForType(it) == requested }
     }
-    if (activeType != null && activeType in availableTypes && activeType in EXTERNAL_TYPES) {
+    if (activeType != null && activeType in availableTypes &&
+      (activeType in EXTERNAL_TYPES || routeForType(activeType) == OutputRoute.OTHER)
+    ) {
       return activeType
     }
     return availableTypes.firstOrNull { routeForType(it) == OutputRoute.BLUETOOTH }
@@ -105,12 +107,14 @@ class VoiceCallAudioSession(
   private val audioManager: AudioManager,
   private val ledger: CommSessionLedger = sharedLedger,
   handler: Handler = Handler(Looper.getMainLooper()),
-  onOutputStateChanged: (OutputRouteState) -> Unit = {},
+  private val onOutputStateChanged: (OutputRouteState) -> Unit = {},
+  private val sharedOutputRoutes: SharedOutputRouteController = processOutputRoutes,
 ) {
   private val audioSystem = AndroidCommunicationAudioSystem(context, audioManager, handler)
-  private val outputRoutes = OutputRouteController(audioSystem, onOutputStateChanged)
   private var active = false
-  private var focusRequest: AudioFocusRequest? = null
+  private var outputRouteLease: SharedOutputRouteController.Lease? = null
+  private var retainedOutputRoute: OutputRoute? = null
+  private var lastOutputRouteState = inactiveOutputRouteState()
 
   /** Whether the process-global comm configuration was applied successfully. */
   var configurationApplied = false
@@ -122,13 +126,13 @@ class VoiceCallAudioSession(
     if (!ledger.acquire()) {
       // Another engine already configured the process-global state.
       configurationApplied = true
-      outputRoutes.start()
+      acquireOutputRoutes()
       return true
     }
     configurationApplied = runCatching {
       audioManager.mode = AudioManager.MODE_IN_COMMUNICATION
       requestFocus()
-      outputRoutes.start()
+      acquireOutputRoutes()
       true
     }.onFailure { e ->
       runCatching { Log.e(TAG, "voice-call session enter failed: ${e.message}") }
@@ -139,7 +143,11 @@ class VoiceCallAudioSession(
   fun exit() {
     if (!active) return
     active = false
-    outputRoutes.stop()
+    retainedOutputRoute = lastOutputRouteState.requested
+    outputRouteLease?.let(sharedOutputRoutes::release)
+    outputRouteLease = null
+    lastOutputRouteState = inactiveOutputRouteState(retainedOutputRoute)
+    onOutputStateChanged(lastOutputRouteState)
     val restore = ledger.release()
     configurationApplied = false
     if (!restore) return
@@ -154,12 +162,51 @@ class VoiceCallAudioSession(
     audioSystem.setPlaybackAttributes(attributes)
   }
 
-  fun outputRouteState(): OutputRouteState = outputRoutes.snapshot()
+  fun outputRouteState(): OutputRouteState = if (active && outputRouteLease != null) {
+    sharedOutputRoutes.snapshot()
+  } else {
+    lastOutputRouteState
+  }
 
-  fun selectOutputRoute(route: OutputRoute?): OutputRouteState = outputRoutes.select(route)
+  fun selectOutputRoute(route: OutputRoute?): OutputRouteState {
+    retainedOutputRoute = route
+    if (!active || outputRouteLease == null) {
+      lastOutputRouteState = inactiveOutputRouteState(route)
+      onOutputStateChanged(lastOutputRouteState)
+      return lastOutputRouteState
+    }
+    return sharedOutputRoutes.select(route)
+  }
 
-  fun ensureMinimumPlaybackVolume(minimum: Double): OutputRouteState =
-    outputRoutes.ensureMinimumVolume(minimum)
+  fun ensureMinimumPlaybackVolume(minimum: Double): OutputRouteState = if (active && outputRouteLease != null) {
+    sharedOutputRoutes.ensureMinimumVolume(minimum)
+  } else {
+    lastOutputRouteState
+  }
+
+  private fun acquireOutputRoutes() {
+    val acquisition = sharedOutputRoutes.acquire(audioSystem, ::handleOutputRouteState)
+    outputRouteLease = acquisition.lease
+    lastOutputRouteState = acquisition.state
+    if (acquisition.isFirst && retainedOutputRoute != null) {
+      sharedOutputRoutes.select(retainedOutputRoute)
+    }
+  }
+
+  private fun handleOutputRouteState(state: OutputRouteState) {
+    lastOutputRouteState = state
+    retainedOutputRoute = state.requested
+    onOutputStateChanged(state)
+  }
+
+  private fun inactiveOutputRouteState(requested: OutputRoute? = retainedOutputRoute): OutputRouteState =
+    OutputRouteState(
+      active = null,
+      available = emptyList(),
+      requested = requested,
+      selectionResult = OutputRouteSelectionResult.UNAVAILABLE,
+      volume = null,
+    )
 
   /// A voice call owns audio focus: other apps' media pauses/ducks (an
   /// uncancellable echo source otherwise) and the OS tells them we're live.
@@ -173,7 +220,7 @@ class VoiceCallAudioSession(
             .build(),
         )
         .build()
-      focusRequest = request
+      processFocusRequest = request
       audioManager.requestAudioFocus(request)
     } else {
       @Suppress("DEPRECATION")
@@ -183,8 +230,8 @@ class VoiceCallAudioSession(
 
   private fun abandonFocus() {
     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-      focusRequest?.let { audioManager.abandonAudioFocusRequest(it) }
-      focusRequest = null
+      processFocusRequest?.let { audioManager.abandonAudioFocusRequest(it) }
+      processFocusRequest = null
     } else {
       @Suppress("DEPRECATION")
       audioManager.abandonAudioFocus(null)
@@ -196,5 +243,11 @@ class VoiceCallAudioSession(
 
     /** One process-global ledger — the state it guards is process-global. */
     val sharedLedger = CommSessionLedger()
+
+    /** Communication routing is process-global for the same reason. */
+    val processOutputRoutes = SharedOutputRouteController()
+
+    /** The final holder must abandon the request created by the first holder. */
+    var processFocusRequest: AudioFocusRequest? = null
   }
 }
