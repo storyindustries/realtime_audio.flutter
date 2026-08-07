@@ -10,7 +10,7 @@
 - ⏸️ Pause support.
 - 📊 Volume tracking in dBFS.
 - 🎛️ Voice isolation and other processing on iOS.
-- 📱 iOS audio session handling for max volume.
+- 🔀 Privacy-safe speaker, receiver, wired, and Bluetooth route readback and selection.
 - 🤖🍏🍎 Android, iOS, and macOS support.
 - ✂️ Audio response truncation support.
 - 🎵 Background audio track support.
@@ -151,6 +151,37 @@ playback-head segment with its own scheduled extent so an older flushed stream
 cannot leave permanent lifetime-scheduled debt. Android chunk completion and
 natural drain are emitted only when the hardware playback head reaches exact
 chunk-end markers—`AudioTrack.write()` acceptance is never treated as playout.
+
+## 🔀 Output route and playback volume
+
+Output state contains coarse categories only—never hardware names or device
+identifiers—and always reports the route the platform actually applied:
+
+```dart
+final state = await audio.getOutputRouteState();
+// state.active          — speaker | receiver | wired | bluetooth | other
+// state.available       — routes currently selectable
+// state.requested       — retained explicit request, if any
+// state.selectionResult — automatic | applied | pending | failed | unavailable
+// state.volumeControlStream / state.volume — applicable coarse gain readback
+
+audio.outputRouteStateStream.listen((state) {
+  // Native route/device changes and selection readbacks.
+});
+
+final selection = await audio.setOutputRoute(RealtimeAudioOutputRoute.speaker);
+final raised = await audio.ensureMinimumPlaybackVolume(0.6);
+```
+
+`other` is a readback-only fallback for platform routes without a public
+category. It is never included in `available`; selecting it returns
+`unavailable`.
+
+On Android, the minimum targets the stream derived from the exact playback
+`AudioAttributes`; voice calls therefore change call volume rather than media
+volume. On iOS, system output volume remains user-owned and the method is a
+readback-only no-op. The engine mixer stays at unity so system volume is not
+applied twice.
 
 ## 🎧 Full-duplex trust (AEC read-back)
 

@@ -10,6 +10,7 @@ import 'package:realtime_audio/src/data/realtime_audio_engine_health_event.dart'
 import 'package:realtime_audio/src/data/realtime_audio_instance_response.dart';
 import 'package:realtime_audio/src/data/realtime_audio_playback_clock.dart';
 import 'package:realtime_audio/src/data/realtime_audio_playback_recovery.dart';
+import 'package:realtime_audio/src/data/realtime_audio_output_route_state.dart';
 import 'package:realtime_audio/src/data/realtime_audio_queue_entry.dart';
 import 'package:realtime_audio/src/data/realtime_audio_response.dart';
 import 'package:realtime_audio/src/data/realtime_audio_state.dart';
@@ -97,6 +98,9 @@ class RealtimeAudio {
   final StreamController<RealtimeAudioEngineHealthEvent>
   _engineHealthStreamController =
       StreamController<RealtimeAudioEngineHealthEvent>.broadcast();
+  final StreamController<RealtimeAudioOutputRouteState>
+  _outputRouteStateStreamController =
+      StreamController<RealtimeAudioOutputRouteState>.broadcast();
 
   Stream<Uint8List> get recorderStream => _recorderStreamController.stream;
   Stream<RealtimeAudioState> get stateStream => _stateStreamController.stream;
@@ -118,12 +122,17 @@ class RealtimeAudio {
   Stream<RealtimeAudioEngineHealthEvent> get engineHealthStream =>
       _engineHealthStreamController.stream;
 
+  Stream<RealtimeAudioOutputRouteState> get outputRouteStateStream =>
+      _outputRouteStateStreamController.stream;
+
   String? _id;
   MethodChannel? _channel;
   bool _isDisposed = false;
 
   RealtimeAudioState _state = const RealtimeAudioState();
   RealtimeAudioState get state => _state;
+  RealtimeAudioOutputRouteState? _outputRouteState;
+  RealtimeAudioOutputRouteState? get outputRouteState => _outputRouteState;
 
   static Future<RealtimeAudioRecordPermission> getRecordPermission() async {
     final RealtimeAudioResponseGetRecordPermission response =
@@ -195,6 +204,13 @@ class RealtimeAudio {
             RealtimeAudioEngineHealthEvent.fromMap(arguments),
           );
         }
+        break;
+      case 'outputRouteState':
+        _updateOutputRouteState(
+          RealtimeAudioOutputRouteState.fromMap(
+            Map<Object?, Object?>.from(call.arguments as Map),
+          ),
+        );
         break;
       case 'chunkQueued':
         handleChunkQueued(call.arguments as String);
@@ -422,6 +438,67 @@ class RealtimeAudio {
         ),
       );
 
+  Future<RealtimeAudioOutputRouteState?> getOutputRouteState() =>
+      _withInitAndLock(() async {
+        final map = await _channel?.invokeMapMethod<Object?, Object?>(
+          'getOutputRouteState',
+        );
+        return map == null
+            ? null
+            : _updateOutputRouteState(
+                RealtimeAudioOutputRouteState.fromMap(map),
+              );
+      });
+
+  /// Select an output category. Passing null restores automatic routing.
+  /// [RealtimeAudioOutputRoute.other] is readback-only and returns unavailable.
+  Future<RealtimeAudioOutputRouteState?> setOutputRoute(
+    RealtimeAudioOutputRoute? route,
+  ) => _withInitAndLock(() async {
+    final map = await _channel?.invokeMapMethod<Object?, Object?>(
+      'setOutputRoute',
+      {'route': route?.name},
+    );
+    return map == null
+        ? null
+        : _updateOutputRouteState(
+            RealtimeAudioOutputRouteState.fromMap(map),
+          );
+  });
+
+  /// Raises the volume stream selected by the native playback attributes.
+  /// The OS remains the source of truth and may clamp the requested floor.
+  Future<RealtimeAudioOutputRouteState?> ensureMinimumPlaybackVolume(
+    double minimum,
+  ) {
+    if (!minimum.isFinite || minimum < 0 || minimum > 1) {
+      throw RangeError.range(minimum, 0, 1, 'minimum');
+    }
+    return _withInitAndLock(() async {
+      final map = await _channel?.invokeMapMethod<Object?, Object?>(
+        'ensureMinimumPlaybackVolume',
+        {'minimum': minimum},
+      );
+      return map == null
+          ? null
+          : _updateOutputRouteState(
+              RealtimeAudioOutputRouteState.fromMap(map),
+            );
+    });
+  }
+
+  RealtimeAudioOutputRouteState _updateOutputRouteState(
+    RealtimeAudioOutputRouteState state,
+  ) {
+    if (_outputRouteState != state) {
+      _outputRouteState = state;
+      if (!_outputRouteStateStreamController.isClosed) {
+        _outputRouteStateStreamController.add(state);
+      }
+    }
+    return state;
+  }
+
   /// Dynamically toggle the recorder (and voice processing / AEC) without
   /// disposing the engine. The native side reconfigures the audio session
   /// and restarts the engine internally.
@@ -475,6 +552,18 @@ class RealtimeAudio {
     _id = response.id;
     _channel = MethodChannel('dev.volskaya.RealtimeAudio/engines/$_id');
     _channel!.setMethodCallHandler(_handleChannel);
+    Map<Object?, Object?>? routeMap;
+    try {
+      routeMap = await _channel!.invokeMapMethod<Object?, Object?>(
+        'getOutputRouteState',
+      );
+    } on MissingPluginException {
+      // Additive read-back remains compatible with an older native binary
+      // during a hot restart or staggered application update.
+    }
+    if (routeMap != null) {
+      _updateOutputRouteState(RealtimeAudioOutputRouteState.fromMap(routeMap));
+    }
   }
 
   Future<void> dispose() async {
@@ -503,6 +592,8 @@ class RealtimeAudio {
       _recorderErrorStreamController.sink.close();
       _engineHealthStreamController.close();
       _engineHealthStreamController.sink.close();
+      _outputRouteStateStreamController.close();
+      _outputRouteStateStreamController.sink.close();
       _stateStreamController.close();
       _stateStreamController.sink.close();
       if (_id != null) {

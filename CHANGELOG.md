@@ -1,3 +1,21 @@
+## 0.0.18
+
+* Add privacy-safe output-route state, change notifications, and explicit
+  speaker, receiver, wired, and Bluetooth selection with native readback.
+* Derive Android volume control from the playback `AudioAttributes`, verify
+  communication-device selection, and reapply retained user routing after
+  device changes.
+* Keep the iOS engine mixer at unity instead of multiplying the user-owned
+  system volume twice. VoiceProcessingIO now applies a post-start speaker
+  override while preserving external and explicit routes.
+* Report route-selection failures as typed engine-health events and expose the
+  applicable coarse volume stream and normalized volume for diagnostics.
+* Reconcile asynchronous iOS route changes from native readback, retain explicit
+  routes safely across device changes, and clear stale route state on teardown.
+* Serialize process-global Android communication routing across overlapping
+  engines, report real queued audio in failure health, and keep `other`
+  readback-only.
+
 ## 0.0.17
 
 * Fix intermittent iOS call startup by removing the incompatible combination

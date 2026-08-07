@@ -33,6 +33,20 @@ class RealtimeAudio: NSObject {
   private var playerOutputFormat: AVAudioFormat!
 
   private let audioSession = RealtimeAudioSession()
+  private lazy var audioOutput = IOSAudioOutputController(
+    session: audioSession,
+    scheduleTimeout: { [weak self] delay, action in
+      guard let self else { return {} }
+      let workItem = DispatchWorkItem(block: action)
+      self.nativeQueue.asyncAfter(deadline: .now() + delay, execute: workItem)
+      return { workItem.cancel() }
+    },
+    onAsyncUpdate: { [weak self] failure in
+      guard let self, !isDisposed else { return }
+      reportOutputRouteFailure(failure)
+      notifyOutputRouteState()
+    }
+  )
   private let audioEngine = AVAudioEngine()
   private let audioMixerNode = AVAudioMixerNode()
   private var audioPlayerNode: ChunkAudioPlayerNode!
@@ -153,7 +167,8 @@ class RealtimeAudio: NSObject {
       outputFormat: outputFormat,
       callbackQueue: nativeQueue
     )
-    audioBackgroundNode = arguments.backgroundEnabled
+    audioBackgroundNode =
+      arguments.backgroundEnabled
       ? try LoopAudioPlayerNode(
         inputFormat: playerInputFormat,
         outputFormat: outputFormat,
@@ -198,9 +213,11 @@ class RealtimeAudio: NSObject {
     audioEngine.attach(equalizer)
 
     audioEngine.connect(audioPlayerNode, to: equalizer, format: playerOutputFormat)
-    audioEngine.connect(equalizer, to: audioMixerNode, fromBus: 0, toBus: 0, format: playerOutputFormat)
+    audioEngine.connect(
+      equalizer, to: audioMixerNode, fromBus: 0, toBus: 0, format: playerOutputFormat)
     if let audioBackgroundNode {
-      audioEngine.connect(audioBackgroundNode, to: audioMixerNode, fromBus: 0, toBus: 1, format: playerOutputFormat)
+      audioEngine.connect(
+        audioBackgroundNode, to: audioMixerNode, fromBus: 0, toBus: 1, format: playerOutputFormat)
     }
 
     audioEngine.connect(audioMixerNode, to: audioEngine.mainMixerNode, format: nil)
@@ -257,7 +274,6 @@ class RealtimeAudio: NSObject {
     guard !observersAttached else { return }
     observersAttached = true
     #if os(iOS)
-      audioSession.instance.addObserver(self, forKeyPath: "outputVolume", options: .new, context: nil)
       NotificationCenter.default.addObserver(
         self,
         selector: #selector(handleAudioRouteChange),
@@ -283,9 +299,6 @@ class RealtimeAudio: NSObject {
     guard observersAttached else { return }
     observersAttached = false
     NotificationCenter.default.removeObserver(self)
-    #if os(iOS)
-      audioSession.instance.removeObserver(self, forKeyPath: "outputVolume")
-    #endif
   }
 
   /// Flutter's binary messenger owns handler registration on the platform
@@ -347,6 +360,20 @@ class RealtimeAudio: NSObject {
       nativeQueue.async { [weak self] in
         guard let self, !isDisposed else { return }
         audioCaptureStrategy = negotiateAudioCaptureStrategy(recorderEnabled: isRecorderEnabled)
+        let rawReason = notification.userInfo?[AVAudioSessionRouteChangeReasonKey] as? UInt
+        let reason =
+          rawReason
+          .flatMap(AVAudioSession.RouteChangeReason.init(rawValue:))
+          .map(audioRouteChangeReason) ?? .other
+        reportOutputRouteFailure(
+          audioOutput.handleRouteChange(
+            reason: reason,
+            voiceProcessingActive: audioCaptureStrategy == .inputVoiceProcessing,
+            routeSelectionAvailable: isRecorderEnabled,
+            engineIsStarted: shouldBeStarted
+          )
+        )
+        notifyOutputRouteState()
       }
     }
 
@@ -445,6 +472,7 @@ class RealtimeAudio: NSObject {
         removeRecorderTap()
       },
       resumePreservedPlayback: {
+        applyPostStartOutputPolicy()
         playBackground()
         AudioEngineConfigurationRecovery.resumePreservedPlayback(
           shouldRestart: true,
@@ -462,10 +490,61 @@ class RealtimeAudio: NSObject {
   }
 
   private func changeVolume() {
-    if !isRecorderEnabled { return }
     #if os(iOS)
-      audioEngine.mainMixerNode.outputVolume = audioSession.instance.outputVolume
+      audioEngine.mainMixerNode.outputVolume = IOSPlaybackGainPolicy.mainMixerGain(
+        systemOutputVolume: audioSession.systemOutputVolume ?? 1
+      )
     #endif
+  }
+
+  private func outputRouteStateMap() -> [String: Any] {
+    #if os(iOS)
+      return audioOutput.stateMap(routeSelectionAvailable: isRecorderEnabled)
+    #else
+      return audioOutput.stateMap(routeSelectionAvailable: false)
+    #endif
+  }
+
+  #if os(iOS)
+    private func audioRouteChangeReason(
+      _ reason: AVAudioSession.RouteChangeReason
+    ) -> IOSAudioRouteChangeReason {
+      switch reason {
+      case .newDeviceAvailable: return .newDeviceAvailable
+      case .oldDeviceUnavailable: return .oldDeviceUnavailable
+      case .categoryChange: return .categoryChange
+      case .override: return .override
+      default: return .other
+      }
+    }
+  #endif
+
+  private func notifyOutputRouteState() {
+    invokeFlutter("outputRouteState", arguments: outputRouteStateMap())
+  }
+
+  private func applyPostStartOutputPolicy() {
+    changeVolume()
+    #if os(iOS)
+      reportOutputRouteFailure(
+        audioOutput.applyPostStart(
+          voiceProcessingActive: audioCaptureStrategy == .inputVoiceProcessing,
+          routeSelectionAvailable: isRecorderEnabled
+        )
+      )
+    #endif
+    notifyOutputRouteState()
+  }
+
+  private func reportOutputRouteFailure(_ message: String?) {
+    guard let message else { return }
+    notifyEngineHealth(
+      type: "output_route_selection_failed",
+      engineWasRunning: audioEngine.isRunning,
+      message: message,
+      outputRoute: audioSession.outputRouteClass,
+      outputSampleRate: Int((audioSession.sampleRate ?? playerSampleRate).rounded())
+    )
   }
 
   deinit {
@@ -513,28 +592,9 @@ class RealtimeAudio: NSObject {
     try audioSession.deactivate()
   }
 
-  override func observeValue(
-    forKeyPath keyPath: String?,
-    of object: Any?,
-    change: [NSKeyValueChangeKey: Any]?,
-    context: UnsafeMutableRawPointer?
-  ) {
-    guard keyPath == "outputVolume" else { return }
-    nativeQueue.async { [weak self] in
-      guard let self, !isDisposed else { return }
-      #if os(iOS)
-        if audioEngine.mainMixerNode.outputVolume != audioSession.instance.outputVolume {
-          changeVolume()
-          invokeFlutter(
-            "echo",
-            arguments: "Volume changing to \(audioSession.instance.outputVolume)"
-          )
-        }
-      #endif
-    }
-  }
-
-  private func getRecorderConverter(_ from: AVAudioFormat, _ to: AVAudioFormat) throws -> AVAudioConverter {
+  private func getRecorderConverter(_ from: AVAudioFormat, _ to: AVAudioFormat) throws
+    -> AVAudioConverter
+  {
     guard let converter = AVAudioConverter(from: from, to: to) else {
       throw TextError("Failed to create an AVAudioConverter.")
     }
@@ -703,7 +763,9 @@ extension RealtimeAudio {
     }
   }
 
-  private func handleFlutterMethodSafe(call: FlutterMethodCall, result: @escaping FlutterResult) throws {
+  private func handleFlutterMethodSafe(call: FlutterMethodCall, result: @escaping FlutterResult)
+    throws
+  {
     var value: Any? = true
 
     switch call.method {
@@ -711,7 +773,9 @@ extension RealtimeAudio {
       guard let arguments = call.arguments as? [String: Any] else {
         throw TextError("Missing arguments for \(call.method)")
       }
-      guard let id = arguments["id"] as? String else { throw TextError("Missing id for: \(call.method).") }
+      guard let id = arguments["id"] as? String else {
+        throw TextError("Missing id for: \(call.method).")
+      }
       guard let data = arguments["data"] as? FlutterStandardTypedData else {
         throw TextError("Missing data for: \(call.method).")
       }
@@ -736,7 +800,8 @@ extension RealtimeAudio {
       guard let expectedScheduledMs = arguments["expectedScheduledMs"] as? Int else {
         throw TextError("Missing expectedScheduledMs for: \(call.method).")
       }
-      let outcome = audioPlayerNode.repairPlaybackAccounting(expectedScheduledMs: expectedScheduledMs)
+      let outcome = audioPlayerNode.repairPlaybackAccounting(
+        expectedScheduledMs: expectedScheduledMs)
       notifyPlayerState(isPaused: nil)
       value = [
         "repaired": outcome == .repaired,
@@ -749,6 +814,32 @@ extension RealtimeAudio {
       break
     case "getEchoCancellationState":
       value = echoCancellationStateMap()
+      break
+    case "getOutputRouteState":
+      value = outputRouteStateMap()
+      break
+    case "setOutputRoute":
+      #if os(iOS)
+        let arguments = call.arguments as? [String: Any]
+        let rawRoute = arguments?["route"] as? String
+        reportOutputRouteFailure(
+          audioOutput.setRequestedOutput(
+            rawRoute,
+            voiceProcessingActive: audioCaptureStrategy == .inputVoiceProcessing,
+            routeSelectionAvailable: isRecorderEnabled
+          )
+        )
+        notifyOutputRouteState()
+        value = outputRouteStateMap()
+      #else
+        value = outputRouteStateMap()
+      #endif
+      break
+    case "ensureMinimumPlaybackVolume":
+      // iOS system output volume is user-owned. Keep the engine mixer at unity
+      // and return the observable state without attempting a programmatic change.
+      changeVolume()
+      value = outputRouteStateMap()
       break
     //
     case "start":
@@ -769,8 +860,12 @@ extension RealtimeAudio {
         throw TextError("Missing arguments for \(call.method)")
       }
 
-      guard let id = arguments["id"] as? String else { throw TextError("Missing id for: \(call.method).") }
-      guard let loop = (arguments["loop"] as? Bool) else { throw TextError("Missing loop for: \(call.method).") }
+      guard let id = arguments["id"] as? String else {
+        throw TextError("Missing id for: \(call.method).")
+      }
+      guard let loop = (arguments["loop"] as? Bool) else {
+        throw TextError("Missing loop for: \(call.method).")
+      }
       guard let data = arguments["data"] as? FlutterStandardTypedData else {
         throw TextError("Missing data for: \(call.method).")
       }
@@ -817,7 +912,8 @@ extension RealtimeAudio {
     // A true wedge is destructive by definition: the independent render clock
     // is frozen and scheduled audio cannot progress. Fold the clock and discard
     // the stranded player queue before restoring readiness.
-    let recoveryDecision = PlaybackWedgeRecoveryPolicy.decide(engineIsRunning: audioEngine.isRunning)
+    let recoveryDecision = PlaybackWedgeRecoveryPolicy.decide(
+      engineIsRunning: audioEngine.isRunning)
     stopAudio()
     if recoveryDecision == .discardPlayerAndRestartEngine {
       audioEngine.prepare()
@@ -906,7 +1002,8 @@ extension RealtimeAudio {
     let inputFormat = input.inputFormat(forBus: recorderPreferredBus)
     let ratio: Float = Float(inputFormat.sampleRate) / Float(recorderFormat.sampleRate)
     let converter = try getRecorderConverter(inputFormat, recorderFormat)
-    let bufferSize = AVAudioFrameCount(inputFormat.sampleRate * Double(arguments.recorderChunkInterval) / 1000)
+    let bufferSize = AVAudioFrameCount(
+      inputFormat.sampleRate * Double(arguments.recorderChunkInterval) / 1000)
     var hasReportedLiveBuffer = false
 
     input.installTap(
@@ -946,7 +1043,9 @@ extension RealtimeAudio {
         }
       }
 
-      if self.recorderFormat.commonFormat == AVAudioCommonFormat.pcmFormatInt16 && status == .haveData {
+      if self.recorderFormat.commonFormat == AVAudioCommonFormat.pcmFormatInt16
+        && status == .haveData
+      {
         self.handleRecorderData(buffer)
       }
     }
@@ -997,7 +1096,8 @@ extension RealtimeAudio {
     #endif
 
     // Send the list to Flutter.
-    let flutterData = FlutterStandardTypedData(bytes: NSData(bytes: data, length: data.count) as Data)
+    let flutterData = FlutterStandardTypedData(
+      bytes: NSData(bytes: data, length: data.count) as Data)
     let volume = [buffer].getDbfs(0, Int(buffer.frameLength))
 
     DispatchQueue.main.async { [weak self] in
@@ -1038,6 +1138,7 @@ extension RealtimeAudio {
   private func start() throws {
     try audioEngine.start()
     shouldBeStarted = true
+    applyPostStartOutputPolicy()
     playBackground()
     playAudio()
   }
@@ -1052,6 +1153,7 @@ extension RealtimeAudio {
   private func resume() throws {
     try audioEngine.start()
     shouldBePaused = false
+    applyPostStartOutputPolicy()
     playBackground()
     playAudio()
   }
@@ -1135,6 +1237,15 @@ extension RealtimeAudio {
       voiceProcessingRequested: arguments.voiceProcessing
     )
     try audioSession.activate()
+
+    #if os(iOS)
+      if enabled {
+        audioOutput.activate()
+      } else {
+        audioOutput.deactivate()
+      }
+      notifyOutputRouteState()
+    #endif
 
     #if os(iOS)
       if enabled && arguments.voiceProcessing && webRtcApm == nil {

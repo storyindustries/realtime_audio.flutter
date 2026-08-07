@@ -28,5 +28,6 @@ abstract class RealtimeAudioState with _$RealtimeAudioState {
     @Default(false) bool isRendering,
   }) = _RealtimeAudioState;
 
-  factory RealtimeAudioState.fromJson(Map<String, dynamic> json) => _$RealtimeAudioStateFromJson(json);
+  factory RealtimeAudioState.fromJson(Map<String, dynamic> json) =>
+      _$RealtimeAudioStateFromJson(json);
 }
